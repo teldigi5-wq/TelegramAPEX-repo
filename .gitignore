@@ -1,0 +1,40 @@
+# ── SECRETS - never commit these ────────────────────────────────────────────
+# Your Telegram API credentials
+config_v10.json
+config.json
+telegram_details.txt
+
+# Your logged-in Telegram session (equivalent to a password - NEVER share/commit)
+apex_session.session
+apex_session*.session
+*.session
+*.session-journal
+
+# ── Runtime / generated data ─────────────────────────────────────────────────
+downloaded_v10.json
+queue_v10.json
+TelegramDownloads/
+*.log
+build_log.txt
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# ── PyInstaller build artifacts ──────────────────────────────────────────────
+build/
+dist/
+*.spec
+!TelegramAPEX.spec.template
+hook_apex.py
+*.exe
+
+# ── OS / editor cruft ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

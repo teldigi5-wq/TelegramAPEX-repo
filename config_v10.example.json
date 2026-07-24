@@ -1,0 +1,10 @@
+{
+  "api_id": "YOUR_API_ID",
+  "api_hash": "YOUR_API_HASH",
+  "download_folder": "C:\\Users\\you\\TelegramDownloads",
+  "preset": "Turbo",
+  "bandwidth_kbps": 0,
+  "theme": "dark",
+  "max_concurrent": 0,
+  "auto_watch": false
+}
