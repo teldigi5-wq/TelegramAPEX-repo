@@ -209,16 +209,33 @@ class TurboDownloader:
         try:
             size   = self._sz(msg.media)
             is_doc = isinstance(msg.media, MessageMediaDocument)
-            if is_doc and size >= PAR_MIN:
+            last_err = None
+            for attempt in range(3):
+                if msg.id in self._cancel:
+                    self._cancel.discard(msg.id)
+                    raise asyncio.CancelledError()
                 try:
-                    return await asyncio.wait_for(self._parallel(msg,filepath,size,on_prog), timeout=900)
+                    if is_doc and size >= PAR_MIN:
+                        try:
+                            return await asyncio.wait_for(self._parallel(msg,filepath,size,on_prog), timeout=900)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as e:
+                            log.warning(f"Parallel failed ({e}), stream fallback")
+                        shutil.rmtree(filepath+".parts", ignore_errors=True)
+                        try:
+                            if os.path.exists(filepath): os.remove(filepath)
+                        except Exception: pass
+                    return await asyncio.wait_for(self._stream(msg,filepath,size,on_prog), timeout=3600)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
-                    log.warning(f"Parallel failed ({e}), stream fallback")
-                shutil.rmtree(filepath+".parts", ignore_errors=True)
-                try:
-                    if os.path.exists(filepath): os.remove(filepath)
-                except Exception: pass
-            return await asyncio.wait_for(self._stream(msg,filepath,size,on_prog), timeout=3600)
+                    last_err = e
+                    if attempt < 2:
+                        log.warning(f"Download attempt {attempt+1} failed for msg {msg.id} ({e}), retrying...")
+                        await asyncio.sleep(3*(attempt+1))
+                    else:
+                        raise last_err
         finally:
             self._active_streams = max(0, self._active_streams-1)
 
@@ -263,6 +280,8 @@ class TurboDownloader:
                         pct=min(int(done/size*100),99)
                         eta=int((size-done)/(done/el)) if done>0 and el>0.5 else 0
                         on_prog(pct,spd2,done,size,eta)
+            if size and done < size:
+                raise IOError(f"Incomplete download: got {done} of {size} bytes (connection likely dropped early)")
             if os.path.exists(filepath): os.remove(filepath)
             os.rename(tmp,filepath)
         except Exception:
@@ -331,6 +350,12 @@ class TurboDownloader:
                     p=os.path.join(parts,f"{i:03d}")
                     if os.path.exists(p):
                         with open(p,"rb") as pf: shutil.copyfileobj(pf,out,8*1024*1024)
+            final_size=os.path.getsize(tmp)
+            if size and final_size < size:
+                shutil.rmtree(parts,ignore_errors=True)
+                try: os.remove(tmp)
+                except Exception: pass
+                raise IOError(f"Incomplete assembled download: got {final_size} of {size} bytes")
             shutil.rmtree(parts,ignore_errors=True)
             if os.path.exists(filepath): os.remove(filepath)
             os.rename(tmp,filepath)
@@ -1187,6 +1212,7 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
   padding:10px 32px;border-radius:20px;cursor:pointer;font-size:13px;font-weight:700;
   transition:all .2s ease;position:relative;overflow:hidden}
 .load-more-btn:hover{background:var(--bg4);color:var(--tx1);border-color:var(--acc);box-shadow:var(--glow-acc);transform:translateY(-2px)}
+.load-more-btn:disabled{opacity:.6;cursor:default;transform:none;box-shadow:none}
 
 /* ===================== MEDIA CARD ===================== */
 .media-card{background:var(--card);border-radius:var(--r);overflow:hidden;cursor:pointer;
@@ -1579,7 +1605,7 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
         <div class="empty-sub">Pick a chat from the sidebar to browse and download its media files</div>
       </div>
       <div id="load-more-wrap" style="display:none">
-        <button class="load-more-btn" onclick="loadMore()">↻ Load More</button>
+        <button class="load-more-btn" id="load-more-btn" onclick="loadMore()">↻ Load More</button>
       </div>
     </div>
 
@@ -2243,7 +2269,11 @@ async function loadMedia(){
   renderCards(fresh,grid);
   setBotStatus(`${S.media.length} items loaded from ${S.currentChat.name}`);
   document.getElementById('bot-count').textContent=S.media.length+' items';
-  document.getElementById('load-more-wrap').style.display=data.items.length>=50?'flex':'none';
+  const lmWrap=document.getElementById('load-more-wrap');
+  const lmBtn=document.getElementById('load-more-btn');
+  const hasMore=data.items.length>=50;
+  lmWrap.style.display=hasMore?'flex':'none';
+  if(lmBtn && hasMore) lmBtn.textContent=`↻ Load More (${S.media.length} loaded)`;
 }
 
 function renderCards(items,grid){
@@ -2347,7 +2377,12 @@ function loadThumbs(items){
   });
 }
 
-async function loadMore(){ await loadMedia(); }
+async function loadMore(){
+  const btn=document.getElementById('load-more-btn');
+  if(btn){ btn.disabled=true; btn.dataset.prevText=btn.textContent; btn.textContent='⏳ Loading…'; }
+  await loadMedia();
+  if(btn){ btn.disabled=false; if(btn.textContent==='⏳ Loading…') btn.textContent=btn.dataset.prevText||'↻ Load More'; }
+}
 
 /* ===================== FILTER / SORT ===================== */
 function setFilter(btn){
@@ -2815,7 +2850,8 @@ def find_free_port():
         s.bind(('',0)); return s.getsockname()[1]
 
 def main():
-    port = find_free_port()
+    port = int(os.environ.get("APEX_PORT") or find_free_port())
+    headless = os.environ.get("APEX_HEADLESS") == "1"
     try: import cryptg  # noqa
     except ImportError: print("[WARN] cryptg not installed - downloads will be slower. Run: pip install cryptg")
     if not PIL_OK: print("[WARN] pillow missing - thumbnails disabled")
@@ -2831,6 +2867,20 @@ def main():
     import time as _time
     url = f"http://127.0.0.1:{port}/?v={int(_time.time())}"
     print(f"[APEX v10] Running at {url}")
+    # Machine-readable line an Electron/desktop wrapper can watch stdout for,
+    # instead of guessing when the server is ready.
+    print(f"APEX_READY:{port}", flush=True)
+
+    if headless:
+        # Spawned by a desktop shell (e.g. Electron) which opens its own
+        # window - don't also launch a browser here.
+        print("[APEX v10] Headless mode - waiting for external UI to connect.")
+        print("[APEX v10] Press Ctrl+C to stop.")
+        try:
+            while True: time.sleep(1)
+        except KeyboardInterrupt:
+            print("\n[APEX v10] Shutting down.")
+        return
 
     _launched = False
     if sys.platform == "win32":

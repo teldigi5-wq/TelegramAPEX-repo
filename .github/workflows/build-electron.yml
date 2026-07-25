@@ -1,7 +1,7 @@
-name: Build Windows EXE
+name: Build Electron Installer
 
-# Builds automatically whenever you publish a GitHub Release,
-# and can also be triggered manually from the Actions tab.
+# Builds the Python backend, bundles it inside an Electron desktop shell,
+# and packages the result as a Windows installer (.exe) via electron-builder.
 on:
   release:
     types: [published]
@@ -21,12 +21,17 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install telethon pillow cryptg pyaes rsa flask pywebview pyinstaller
+          python -m pip install telethon pillow cryptg pyaes rsa flask pyinstaller
 
-      - name: Build EXE with PyInstaller
+      - name: Build backend EXE with PyInstaller
         shell: cmd
         run: |
           python -m PyInstaller TelegramAPEX_v9.py ^
@@ -48,22 +53,44 @@ jobs:
             --exclude-module matplotlib --exclude-module numpy --exclude-module pandas ^
             --exclude-module PyQt5 --exclude-module tkinter --exclude-module test
 
-      - name: Verify build output
+      - name: Verify backend build
         shell: cmd
         run: |
           if not exist dist\TelegramAPEX_v10.exe (
-            echo Build failed - exe not found
+            echo Backend build failed - exe not found
             exit /b 1
           )
+
+      - name: Stage backend into electron/backend
+        shell: cmd
+        run: |
+          mkdir electron\backend
+          copy dist\TelegramAPEX_v10.exe electron\backend\TelegramAPEX_v10.exe
+
+      - name: Install Electron dependencies
+        working-directory: electron
+        run: npm install
+
+      - name: Build Windows installer
+        working-directory: electron
+        run: npm run dist
+
+      - name: Locate installer
+        id: find_installer
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path "electron/release" -Filter "*.exe" | Select-Object -First 1
+          echo "path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+          echo "name=$($exe.Name)" >> $env:GITHUB_OUTPUT
 
       - name: Upload artifact (every run)
         uses: actions/upload-artifact@v4
         with:
-          name: TelegramAPEX_v10-windows
-          path: dist/TelegramAPEX_v10.exe
+          name: TelegramAPEX-installer-windows
+          path: ${{ steps.find_installer.outputs.path }}
 
-      - name: Attach EXE to release
+      - name: Attach installer to release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/TelegramAPEX_v10.exe
+          files: ${{ steps.find_installer.outputs.path }}

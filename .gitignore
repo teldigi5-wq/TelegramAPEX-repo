@@ -33,6 +33,12 @@ dist/
 hook_apex.py
 *.exe
 
+# ── Electron ──────────────────────────────────────────────────────────────────
+electron/node_modules/
+electron/release/
+electron/backend/
+electron/dist/
+
 # ── OS / editor cruft ─────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
