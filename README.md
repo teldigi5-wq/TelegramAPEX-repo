@@ -11,10 +11,13 @@ preview media, and download photos/videos/audio/documents in parallel — fast.
 ## ✨ Features
 
 - Browse all your Telegram chats/channels and their media in a fast local web UI
+- **Downloads tab** — a dedicated view showing active downloads (live progress), how many are queued, and a session history of completed downloads, separate from the media browser
 - **Concurrent downloads** — several files at once (configurable), not one-at-a-time
 - Adaptive chunked + parallel-segment downloading for large files, chunk size scales up to 8MB on sustained fast links
 - **"5G Ultra" preset** — 8 connections / 8 concurrent files, tuned for high-bandwidth mobile or fiber connections (plus the original Turbo/Balanced/Safe presets)
-- **Load more** pagination fixed to correctly fetch older media instead of re-fetching the same page
+- Downloads are verified for completeness (size-checked) before being marked done, with automatic retry on a dropped connection
+- **"Upscale to 4K"** on any completed video (Downloads tab) — resizes to 3840×2160 via FFmpeg/Lanczos. This sharpens/smooths but does **not** add AI-generated detail; requires [ffmpeg](https://ffmpeg.org/download.html) installed and on your PATH
+- **Load more** pagination fixed to correctly fetch older media instead of re-fetching the same page, with a loading state and running item count
 - Lazy-loaded thumbnails (only fetch thumbnails for cards actually scrolled into view) — noticeably faster on large chats
 - Thumbnails no longer fall back to downloading entire videos/documents just to generate a preview
 - Live per-file progress rows, aggregate speed graph, ETA
@@ -23,7 +26,7 @@ preview media, and download photos/videos/audio/documents in parallel — fast.
 - **Auto-download new incoming media** as it arrives (opt-in)
 - Session download history → export to CSV
 - Checks GitHub Releases for newer versions on startup
-- Ships as a single portable `.exe` — no Python required on the machine you run it on
+- Ships as a single portable `.exe`, **or** as a proper Windows desktop installer via Electron (see below) — no Python required on the machine you run it on either way
 
 ## 🚀 Quick start (from source)
 
@@ -51,6 +54,39 @@ to a GitHub Release automatically. To use it:
 
 You can also trigger a build manually any time from the **Actions** tab
 ("Build Windows EXE" → *Run workflow*), without publishing a release.
+
+## 🖥️ Building the Electron desktop app (no console window, proper installer)
+
+The plain `.exe` above is a console app — a black terminal window sits behind the UI. The
+`electron/` folder wraps the same Python backend in a real desktop shell: no console window,
+a taskbar/Start Menu entry, a proper `Setup.exe` installer, and desktop/Start Menu shortcuts.
+
+**How it works:** Electron spawns the Python backend as a hidden background process
+(`windowsHide: true`, unbuffered stdout so it starts fast and reliably), waits for it to
+report ready, then opens a native window pointed at its local web UI. Closing the window
+stops the backend automatically.
+
+**Build it locally — one command:**
+```
+BUILD_ELECTRON.bat
+```
+This builds the Python backend with PyInstaller, stages it into `electron/backend/`, then
+runs Electron Builder to produce `electron/release/Telegram APEX Setup <version>.exe` — a
+double-click installer for end users, with no Python and no visible console window.
+
+**Build it via GitHub Actions:** the included `.github/workflows/build-electron.yml` does the
+same thing on a clean Windows runner and attaches the installer to your GitHub Release,
+alongside the plain exe. Trigger it the same way — publish a release, or run it manually from
+the Actions tab.
+
+**Developing/testing without building an installer:**
+```bash
+cd electron
+npm install
+npm start
+```
+This runs the backend via `python TelegramAPEX_v9.py` directly (no PyInstaller step) inside
+an Electron window — fast to iterate on.
 
 ## 🔒 Security — read this before pushing to GitHub
 

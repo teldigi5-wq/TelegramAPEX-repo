@@ -985,6 +985,85 @@ def api_export_history():
     return Response(out, mimetype="text/csv",
         headers={"Content-Disposition":f'attachment; filename="{fname}"'})
 
+# -- 4K upscaling (FFmpeg-based resize/interpolation, NOT AI super-resolution) --
+def ffmpeg_available():
+    return shutil.which("ffmpeg") is not None
+
+def _probe_duration_sec(path):
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe: return 0
+    try:
+        out = subprocess.run(
+            [ffprobe,"-v","error","-show_entries","format=duration",
+             "-of","default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=15)
+        return float(out.stdout.strip())
+    except Exception:
+        return 0
+
+def _run_upscale(item_id, src_path):
+    name=os.path.basename(src_path)
+    if not ffmpeg_available():
+        bus.emit("upscale_error",{"id":item_id,"name":name,
+            "msg":"ffmpeg not found. Install it from ffmpeg.org and add it to your system PATH."})
+        return
+    base,_ = os.path.splitext(src_path)
+    out_path = f"{base}_4K.mp4"
+    dur = _probe_duration_sec(src_path)
+    bus.emit("upscale_start",{"id":item_id,"name":name})
+    cmd = ["ffmpeg","-y","-i",src_path,
+           "-vf","scale=3840:2160:force_original_aspect_ratio=decrease:flags=lanczos,"
+                 "pad=3840:2160:(ow-iw)/2:(oh-ih)/2:color=black",
+           "-c:v","libx264","-preset","medium","-crf","18",
+           "-c:a","copy","-progress","pipe:1","-nostats", out_path]
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 text=True, bufsize=1)
+        for line in proc.stdout:
+            line=line.strip()
+            if line.startswith("out_time_ms=") and dur>0:
+                try:
+                    us=int(line.split("=")[1])
+                    pct=max(0,min(99,int((us/1_000_000)/dur*100)))
+                    bus.emit("upscale_progress",{"id":item_id,"pct":pct})
+                except Exception: pass
+            elif line=="progress=end":
+                break
+        proc.wait(timeout=30)
+        if proc.returncode==0 and os.path.exists(out_path) and os.path.getsize(out_path)>0:
+            bus.emit("upscale_done",{"id":item_id,"name":os.path.basename(out_path),"path":out_path})
+        else:
+            try:
+                if os.path.exists(out_path): os.remove(out_path)
+            except Exception: pass
+            bus.emit("upscale_error",{"id":item_id,"name":name,
+                "msg":f"ffmpeg exited with code {proc.returncode}"})
+    except Exception as e:
+        bus.emit("upscale_error",{"id":item_id,"name":name,"msg":str(e)})
+
+@app.route("/api/ffmpeg_status")
+def api_ffmpeg_status():
+    return jsonify({"available":ffmpeg_available()})
+
+@app.route("/api/upscale", methods=["POST"])
+def api_upscale():
+    data=request.json or {}
+    src=data.get("path",""); item_id=data.get("id","")
+    if not src: return jsonify({"ok":False,"error":"Missing file path"}),400
+    try:
+        real_src=os.path.realpath(src)
+        real_root=os.path.realpath(DOWNLOAD_FOLDER)
+        if not (real_src == real_root or real_src.startswith(real_root+os.sep)):
+            return jsonify({"ok":False,"error":"File must be inside your download folder"}),400
+        if not os.path.exists(real_src):
+            return jsonify({"ok":False,"error":"File not found on disk"}),404
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)}),400
+    if not ffmpeg_available():
+        return jsonify({"ok":False,"error":"ffmpeg not installed or not in PATH. Get it at ffmpeg.org/download.html"}),400
+    threading.Thread(target=_run_upscale,args=(item_id,real_src),daemon=True).start()
+    return jsonify({"ok":True})
+
 @app.route("/api/check_update")
 def api_check_update():
     if "YOUR_GITHUB_USERNAME" in GITHUB_REPO:
@@ -1109,6 +1188,7 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
   white-space:nowrap;min-width:38px;min-height:38px;user-select:none;-webkit-user-select:none;line-height:1}
 .icon-btn:hover{background:var(--bg3);color:var(--tx1);transform:translateY(-1px)}
 .icon-btn:active{transform:scale(.92)}
+.icon-btn.active-nav{background:var(--acc);color:#000}
 .icon-btn .badge{position:absolute;top:3px;right:3px;background:var(--red);color:#fff;
   border-radius:8px;padding:1px 5px;font-size:9px;font-weight:800;line-height:1.4;animation:badgePop .35s ease}
 #topbar::after{content:'';position:absolute;inset:0;
@@ -1213,6 +1293,23 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
   transition:all .2s ease;position:relative;overflow:hidden}
 .load-more-btn:hover{background:var(--bg4);color:var(--tx1);border-color:var(--acc);box-shadow:var(--glow-acc);transform:translateY(-2px)}
 .load-more-btn:disabled{opacity:.6;cursor:default;transform:none;box-shadow:none}
+
+/* ===================== DOWNLOADS TAB ===================== */
+#downloads-view{padding:20px;display:flex;flex-direction:column;gap:22px;max-width:900px;margin:0 auto;width:100%}
+.dlv-section-title{font-size:13px;font-weight:800;color:var(--tx1);letter-spacing:.3px;
+  display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.dlv-section-title span{font-weight:700;color:var(--acc);font-size:12px;background:var(--bg3);
+  padding:1px 8px;border-radius:10px}
+.dlv-note{font-size:11px;color:var(--tx3);line-height:1.6;margin-bottom:10px;max-width:640px}
+.dlv-note a{color:var(--acc)}
+.dlv-list{display:flex;flex-direction:column;gap:8px}
+.dlv-empty{color:var(--tx3);font-size:12px;padding:14px;text-align:center;background:var(--bg2);border-radius:var(--rsm)}
+.dlv-row{display:flex;align-items:center;gap:10px;background:var(--bg2);border:1px solid var(--gb);
+  border-radius:var(--rsm);padding:9px 12px;animation:fadeIn .2s ease}
+.dlv-name{font-size:12px;color:var(--tx1);font-weight:600;max-width:340px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;flex-shrink:0}
+.dlv-meta{font-size:11px;color:var(--tx3);white-space:nowrap;flex-shrink:0}
+.dlv-status{font-size:11px;color:var(--acc);white-space:nowrap;font-weight:700}
 
 /* ===================== MEDIA CARD ===================== */
 .media-card{background:var(--card);border-radius:var(--r);overflow:hidden;cursor:pointer;
@@ -1512,6 +1609,9 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
     <button class="icon-btn" title="Notifications" onclick="toggleNotif()" id="notif-btn">
       🔔<span class="badge" id="notif-badge" style="display:none">0</span>
     </button>
+    <button class="icon-btn" title="Downloads" onclick="toggleDownloadsView()" id="downloads-nav-btn">
+      ⬇<span class="badge" id="dl-nav-badge" style="display:none">0</span>
+    </button>
     <button class="icon-btn" title="Statistics" onclick="toggleStats()" id="stats-btn">📊</button>
     <button class="icon-btn" title="Open Download Folder" onclick="openFolder()">📂</button>
     <button class="icon-btn" title="Toggle Sidebar" onclick="toggleSidebar()">☰</button>
@@ -1606,6 +1706,22 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
       </div>
       <div id="load-more-wrap" style="display:none">
         <button class="load-more-btn" id="load-more-btn" onclick="loadMore()">↻ Load More</button>
+      </div>
+      <div id="downloads-view" style="display:none">
+        <div class="dlv-section">
+          <div class="dlv-section-title">⬇ Active <span id="dlv-active-count">0</span></div>
+          <div id="dlv-active-list" class="dlv-list"><div class="dlv-empty">Nothing downloading right now</div></div>
+        </div>
+        <div class="dlv-section">
+          <div class="dlv-section-title">⏳ Queued <span id="dlv-queued-count">0</span></div>
+        </div>
+        <div class="dlv-section">
+          <div class="dlv-section-title">✅ Completed this session <span id="dlv-completed-count">0</span>
+            <button class="tb-btn" style="margin-left:auto" onclick="exportHistory()">⬇ Export CSV</button>
+          </div>
+          <div class="dlv-note">"Upscale to 4K" resizes video to 3840×2160 using FFmpeg (Lanczos interpolation) - it sharpens and smooths, but it doesn't invent detail the source doesn't have. Requires <a href="https://ffmpeg.org/download.html" target="_blank" rel="noopener">ffmpeg</a> installed and on your system PATH.</div>
+          <div id="dlv-completed-list" class="dlv-list"><div class="dlv-empty">No completed downloads yet this session</div></div>
+        </div>
       </div>
     </div>
 
@@ -1800,6 +1916,7 @@ const S = {
   sidebarTab:'all', currentChat:null, media:[], selected:new Set(),
   filter:'all', sortBy:'date-desc', minId:0, loading:false,
   dlActive:false, curDlId:null, activeDl:new Map(), paused:false,
+  queueRemaining:0, completedLog:[],
   statsVisible:false, sidebarOpen:true,
   theme:_ls('apex-theme','dark'),
   viewMode:_ls('apex-view','grid'),
@@ -1989,6 +2106,7 @@ function startSSE(){
   es.addEventListener('dl_start',e=>{
     const d=JSON.parse(e.data); S.dlActive=true;
     S.activeDl.set(d.id,{name:d.name,pct:0,spd:0,eta:''});
+    S.queueRemaining=d.remaining;
     document.getElementById('dl-panel').classList.add('active');
     document.getElementById('dl-fname').textContent=
       S.activeDl.size>1 ? (S.activeDl.size+' files downloading') : d.name;
@@ -1996,11 +2114,14 @@ function startSSE(){
     setBotStatus('Downloading: '+d.name);
     setCardProg(d.id,0);
     renderDlFileRows();
+    updateDlNavBadge();
+    renderDownloadsView();
   });
   es.addEventListener('dl_progress',e=>{
     const d=JSON.parse(e.data);
     const row=S.activeDl.get(d.id);
     if(row){ row.pct=d.pct; row.spd=d.spd; row.eta=d.eta||''; }
+    S.queueRemaining=d.remaining;
     document.getElementById('dl-qinfo').textContent=d.remaining+' left · '+d.active+' active';
     document.getElementById('q-fill').style.width=
       Math.round(((d.queue_total-d.remaining)/Math.max(d.queue_total,1))*100)+'%';
@@ -2013,26 +2134,31 @@ function startSSE(){
     drawSpeedGraph();
     setCardProg(d.id,d.pct);
     updateDlFileRow(d.id);
+    renderDownloadsView();
   });
   es.addEventListener('dl_done',e=>{
     const d=JSON.parse(e.data);
     S.activeDl.delete(d.id);
+    S.completedLog.push({id:d.id,name:d.name,size_mb:d.size_mb,path:d.path,
+      time:new Date().toLocaleString()});
     toast('Downloaded: '+d.name,'s');
     document.getElementById('bot-hist').textContent='✓ '+d.name;
     markCardDone(d.id);
     addNotif('✅','Downloaded',d.name);
     spawnCompleteParticles();
     renderDlFileRows();
+    updateDlNavBadge();
+    renderDownloadsView();
   });
   es.addEventListener('dl_skipped',e=>{
     const d=JSON.parse(e.data); S.activeDl.delete(d.id);
-    toast('Already done: '+d.name,'w'); renderDlFileRows();
+    toast('Already done: '+d.name,'w'); renderDlFileRows(); updateDlNavBadge(); renderDownloadsView();
   });
   es.addEventListener('dl_error',e=>{
     const d=JSON.parse(e.data); S.activeDl.delete(d.id);
     toast('Failed: '+d.name+(d.msg?' - '+d.msg:''),'e');
     addNotif('❌','Download Failed',d.name);
-    renderDlFileRows();
+    renderDlFileRows(); updateDlNavBadge(); renderDownloadsView();
   });
   es.addEventListener('dl_cancelled',()=>{ toast('Download cancelled','w'); });
   es.addEventListener('dl_paused',()=>{
@@ -2056,8 +2182,10 @@ function startSSE(){
   });
   es.addEventListener('dl_all_done',e=>{
     const d=JSON.parse(e.data);
-    S.dlActive=false; S.curDlId=null; S.activeDl.clear();
+    S.dlActive=false; S.curDlId=null; S.activeDl.clear(); S.queueRemaining=0;
     renderDlFileRows();
+    updateDlNavBadge();
+    renderDownloadsView();
     document.getElementById('q-fill').style.width='100%';
     document.getElementById('dl-speed').textContent='Done ✓';
     document.getElementById('dl-eta').textContent='';
@@ -2070,6 +2198,30 @@ function startSSE(){
       document.getElementById('q-fill').style.width='0%';
       document.getElementById('dl-speed').textContent='—';
     },4000);
+  });
+  es.addEventListener('upscale_start',e=>{
+    const d=JSON.parse(e.data);
+    toast('🎞 Upscaling "'+d.name+'" to 4K…','s',5000);
+    const btn=document.getElementById('dlv-upscale-btn-'+d.id);
+    if(btn){ btn.disabled=true; btn.textContent='⏳ 0%'; }
+  });
+  es.addEventListener('upscale_progress',e=>{
+    const d=JSON.parse(e.data);
+    const btn=document.getElementById('dlv-upscale-btn-'+d.id);
+    if(btn){ btn.textContent='⏳ '+d.pct+'%'; }
+  });
+  es.addEventListener('upscale_done',e=>{
+    const d=JSON.parse(e.data);
+    toast('✅ 4K upscale finished: '+d.name,'s',7000);
+    addNotif('🎞','4K upscale complete',d.name);
+    const btn=document.getElementById('dlv-upscale-btn-'+d.id);
+    if(btn){ btn.disabled=true; btn.textContent='✅ Done'; }
+  });
+  es.addEventListener('upscale_error',e=>{
+    const d=JSON.parse(e.data);
+    toast('❌ 4K upscale failed: '+(d.msg||'unknown error'),'e',9000);
+    const btn=document.getElementById('dlv-upscale-btn-'+d.id);
+    if(btn){ btn.disabled=false; btn.textContent='⬆ Upscale to 4K'; }
   });
   es.onerror=()=>{ if(S.connected) setConn('connecting','Reconnecting...'); };
 }
@@ -2541,6 +2693,85 @@ function updateDlFileRow(id){
 }
 function escHtml(s){
   return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+/* ===================== DOWNLOADS TAB ===================== */
+function toggleDownloadsView(){
+  const dv=document.getElementById('downloads-view');
+  const open = dv.style.display==='none' || !dv.style.display;
+  dv.style.display = open ? 'flex' : 'none';
+  document.getElementById('media-grid').style.display = open ? 'none' : '';
+  const lm=document.getElementById('load-more-wrap');
+  if(open){
+    document.getElementById('empty-state').style.display='none';
+    lm.style.display='none';
+    renderDownloadsView();
+  } else {
+    if(!S.currentChat) document.getElementById('empty-state').style.display='flex';
+  }
+  document.getElementById('downloads-nav-btn').classList.toggle('active-nav',open);
+}
+function updateDlNavBadge(){
+  const b=document.getElementById('dl-nav-badge');
+  const n=S.activeDl.size;
+  if(!b) return;
+  b.textContent=n; b.style.display=n>0?'flex':'none';
+}
+function isVideoFile(name){
+  return /\\.(mp4|mkv|mov|avi|webm|m4v|flv|wmv)$/i.test(name||'');
+}
+function renderDownloadsView(){
+  const dv=document.getElementById('downloads-view');
+  if(dv.style.display==='none') return;
+  const aWrap=document.getElementById('dlv-active-list');
+  document.getElementById('dlv-active-count').textContent=S.activeDl.size;
+  if(S.activeDl.size===0){
+    aWrap.innerHTML='<div class="dlv-empty">Nothing downloading right now</div>';
+  } else {
+    aWrap.innerHTML='';
+    S.activeDl.forEach((row,id)=>{
+      const el=document.createElement('div'); el.className='dlv-row';
+      el.innerHTML=`<span class="dlv-name" title="${escHtml(row.name)}">${escHtml(row.name)}</span>
+        <div class="prog-track" style="flex:1"><div class="prog-fill" style="width:${row.pct||0}%"></div></div>
+        <span class="dlv-meta">${row.pct||0}% · ${(row.spd||0)} MB/s</span>
+        <button class="icon-btn" style="width:22px;height:22px" onclick="cancelDl(${id})" title="Cancel">✕</button>`;
+      aWrap.appendChild(el);
+    });
+  }
+  document.getElementById('dlv-queued-count').textContent=S.queueRemaining;
+  const cWrap=document.getElementById('dlv-completed-list');
+  document.getElementById('dlv-completed-count').textContent=S.completedLog.length;
+  if(!S.completedLog.length){
+    cWrap.innerHTML='<div class="dlv-empty">No completed downloads yet this session</div>';
+  } else {
+    cWrap.innerHTML=S.completedLog.slice().reverse().slice(0,200).map(row=>`
+      <div class="dlv-row" id="dlv-row-${row.id}">
+        <span class="dlv-name" title="${escHtml(row.name)}">✅ ${escHtml(row.name)}</span>
+        <span class="dlv-meta">${row.size_mb} MB</span>
+        <span class="dlv-meta">${esc(row.time)}</span>
+        ${isVideoFile(row.name)?`<button class="tb-btn" id="dlv-upscale-btn-${row.id}" style="padding:4px 10px;font-size:11px" onclick="upscale4k('${row.id}')">⬆ Upscale to 4K</button>`:''}
+      </div>`).join('');
+  }
+}
+async function upscale4k(id){
+  const item=S.completedLog.find(r=>String(r.id)===String(id));
+  if(!item){ toast('Item not found','e'); return; }
+  const check=await fetch('/api/ffmpeg_status').then(r=>r.json()).catch(()=>({available:false}));
+  if(!check.available){
+    toast('ffmpeg not found. Install it from ffmpeg.org and add it to your PATH to use upscaling.','e',9000);
+    return;
+  }
+  const btn=document.getElementById('dlv-upscale-btn-'+id);
+  if(btn){ btn.disabled=true; btn.textContent='⏳ Starting…'; }
+  const r=await fetch('/api/upscale',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({id:item.id,path:item.path})});
+  const d=await r.json().catch(()=>({ok:false}));
+  if(!d.ok){
+    toast('Upscale failed to start: '+(d.error||'unknown error'),'e',8000);
+    if(btn){ btn.disabled=false; btn.textContent='⬆ Upscale to 4K'; }
+  } else {
+    toast('Upscaling to 4K started — this can take a while for long videos','s',6000);
+  }
 }
 
 /* ===================== CARD PROGRESS ===================== */

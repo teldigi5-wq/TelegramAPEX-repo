@@ -48,7 +48,7 @@ function startBackend(port) {
 
     backendProc = spawn(cmd, args, {
       cwd,
-      env: { ...process.env, APEX_PORT: String(port), APEX_HEADLESS: '1' },
+      env: { ...process.env, APEX_PORT: String(port), APEX_HEADLESS: '1', PYTHONUNBUFFERED: '1' },
       windowsHide: true,
     });
 
