@@ -777,6 +777,10 @@ def api_media(chat_id):
     if not state.connected: return jsonify({"error":"not connected"}),400
     limit     = int(request.args.get("limit",50))
     before_id = int(request.args.get("before_id", request.args.get("min_id",0)))
+    refresh   = request.args.get("refresh")=="1"
+    if refresh:
+        state.media_cache[chat_id]=[]
+        before_id=0
     done_ev=threading.Event(); result_holder=[None]
     def on_done(items):
         if chat_id not in state.media_cache: state.media_cache[chat_id]=[]
@@ -809,6 +813,77 @@ def api_thumb(msg_id):
     if path_holder[0] and os.path.exists(path_holder[0]):
         return send_file(path_holder[0],mimetype="image/jpeg")
     return "",404
+
+async def _anext_or_none(agen):
+    try: return await agen.__anext__()
+    except StopAsyncIteration: return None
+
+@app.route("/api/stream/<int:item_id>")
+def api_stream(item_id):
+    mtype = request.args.get("type","video")
+    orig_name = request.args.get("name","") or None
+
+    # 1) Prefer an already-downloaded file on disk - fast path, full native seeking.
+    local_path=None
+    log_entry=next((r for r in state.download_log if r["id"]==item_id), None)
+    if log_entry and log_entry.get("path") and os.path.exists(log_entry["path"]):
+        local_path=log_entry["path"]
+    elif orig_name:
+        sub={"video":"videos","photo":"photos","audio":"audios","document":"docs"}.get(mtype,"docs")
+        base_path=os.path.join(DOWNLOAD_FOLDER,sub,orig_name)
+        b,e=os.path.splitext(base_path)
+        for cand in (base_path, f"{b}_{item_id}{e}"):
+            if os.path.exists(cand) and os.path.getsize(cand)>0:
+                local_path=cand; break
+    if local_path:
+        mime=mimetypes.guess_type(local_path)[0] or "application/octet-stream"
+        return send_file(local_path, mimetype=mime, conditional=True)
+
+    # 2) Not downloaded yet - stream directly from Telegram, honoring Range requests
+    #    so the <video>/<audio> tag can seek without downloading the whole file first.
+    if not state.connected: return jsonify({"error":"Not connected"}),400
+    msg=state.msg_cache.get(item_id)
+    if not msg or not msg.media:
+        return jsonify({"error":"Not available yet - open this chat's media grid first"}),404
+    if not state.be.turbo:
+        return jsonify({"error":"Not connected"}),400
+    size=state.be.turbo._sz(msg.media)
+    if not size:
+        return jsonify({"error":"Unknown file size, cannot stream"}),500
+
+    range_header=request.headers.get("Range")
+    if range_header:
+        try:
+            rng=range_header.split("=")[1]
+            start_s,end_s=rng.split("-")
+            start=int(start_s) if start_s else 0
+            end=int(end_s) if end_s else size-1
+        except Exception:
+            start,end=0,size-1
+    else:
+        start,end=0,size-1
+    end=min(end,size-1); start=max(0,min(start,end))
+    length=end-start+1
+
+    def generate():
+        agen=state.be.client.iter_download(msg.media, offset=start, limit=length, request_size=256*1024)
+        try:
+            while True:
+                fut=state.be.run(_anext_or_none(agen))
+                chunk=fut.result(timeout=30)
+                if chunk is None: break
+                yield bytes(chunk)
+        finally:
+            try: state.be.run(agen.aclose())
+            except Exception: pass
+
+    mime=mimetypes.guess_type(orig_name or "")[0] or ("video/mp4" if mtype=="video" else "application/octet-stream")
+    headers={"Content-Type":mime,"Accept-Ranges":"bytes","Content-Length":str(length)}
+    status=200
+    if range_header:
+        headers["Content-Range"]=f"bytes {start}-{end}/{size}"
+        status=206
+    return Response(stream_with_context(generate()), status=status, headers=headers)
 
 # Download
 @app.route("/api/download", methods=["POST"])
@@ -989,6 +1064,38 @@ def api_export_history():
 def ffmpeg_available():
     return shutil.which("ffmpeg") is not None
 
+_gpu_encoder_cache = {"checked": False, "encoder": None, "label": None}
+
+def detect_gpu_encoder():
+    """Detect an available hardware video encoder. Prefers NVIDIA NVENC (fast on
+    RTX/GTX cards), falls back to Intel QuickSync or AMD AMF, then None (CPU)."""
+    if _gpu_encoder_cache["checked"]:
+        return _gpu_encoder_cache["encoder"], _gpu_encoder_cache["label"]
+    encoder=None; label=None
+    if ffmpeg_available():
+        try:
+            out = subprocess.run(["ffmpeg","-hide_banner","-encoders"],
+                                  capture_output=True, text=True, timeout=10).stdout
+            for cand, lbl in (("hevc_nvenc","NVIDIA NVENC (HEVC)"),
+                               ("h264_nvenc","NVIDIA NVENC"),
+                               ("h264_qsv","Intel QuickSync"),
+                               ("h264_amf","AMD AMF")):
+                if cand in out:
+                    encoder, label = cand, lbl
+                    break
+        except Exception: pass
+    _gpu_encoder_cache.update(checked=True, encoder=encoder, label=label)
+    return encoder, label
+
+def _venc_args(encoder):
+    if encoder and encoder.endswith("_nvenc"):
+        return ["-c:v",encoder,"-preset","p5","-rc","vbr","-cq","19","-b:v","0"]
+    if encoder=="h264_qsv":
+        return ["-c:v","h264_qsv","-global_quality","19"]
+    if encoder=="h264_amf":
+        return ["-c:v","h264_amf","-quality","quality","-rc","cqp","-qp_i","19","-qp_p","19"]
+    return ["-c:v","libx264","-preset","medium","-crf","18"]
+
 def _probe_duration_sec(path):
     ffprobe = shutil.which("ffprobe")
     if not ffprobe: return 0
@@ -1001,6 +1108,28 @@ def _probe_duration_sec(path):
     except Exception:
         return 0
 
+def _ffmpeg_upscale_pass(src_path, out_path, encoder, dur, item_id):
+    """Runs one ffmpeg encode pass, streaming progress via SSE. Returns True on success."""
+    cmd = ["ffmpeg","-y","-i",src_path,
+           "-vf","scale=3840:2160:force_original_aspect_ratio=decrease:flags=lanczos,"
+                 "pad=3840:2160:(ow-iw)/2:(oh-ih)/2:color=black",
+           *_venc_args(encoder),
+           "-c:a","copy","-progress","pipe:1","-nostats", out_path]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             text=True, bufsize=1)
+    for line in proc.stdout:
+        line=line.strip()
+        if line.startswith("out_time_ms=") and dur>0:
+            try:
+                us=int(line.split("=")[1])
+                pct=max(0,min(99,int((us/1_000_000)/dur*100)))
+                bus.emit("upscale_progress",{"id":item_id,"pct":pct})
+            except Exception: pass
+        elif line=="progress=end":
+            break
+    proc.wait(timeout=30)
+    return proc.returncode==0 and os.path.exists(out_path) and os.path.getsize(out_path)>0
+
 def _run_upscale(item_id, src_path):
     name=os.path.basename(src_path)
     if not ffmpeg_available():
@@ -1010,36 +1139,164 @@ def _run_upscale(item_id, src_path):
     base,_ = os.path.splitext(src_path)
     out_path = f"{base}_4K.mp4"
     dur = _probe_duration_sec(src_path)
-    bus.emit("upscale_start",{"id":item_id,"name":name})
-    cmd = ["ffmpeg","-y","-i",src_path,
-           "-vf","scale=3840:2160:force_original_aspect_ratio=decrease:flags=lanczos,"
-                 "pad=3840:2160:(ow-iw)/2:(oh-ih)/2:color=black",
-           "-c:v","libx264","-preset","medium","-crf","18",
-           "-c:a","copy","-progress","pipe:1","-nostats", out_path]
+    encoder, label = detect_gpu_encoder()
+    bus.emit("upscale_start",{"id":item_id,"name":name,
+        "engine": f"GPU ({label})" if encoder else "CPU (no GPU encoder detected)"})
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                 text=True, bufsize=1)
-        for line in proc.stdout:
-            line=line.strip()
-            if line.startswith("out_time_ms=") and dur>0:
-                try:
-                    us=int(line.split("=")[1])
-                    pct=max(0,min(99,int((us/1_000_000)/dur*100)))
-                    bus.emit("upscale_progress",{"id":item_id,"pct":pct})
-                except Exception: pass
-            elif line=="progress=end":
-                break
-        proc.wait(timeout=30)
-        if proc.returncode==0 and os.path.exists(out_path) and os.path.getsize(out_path)>0:
+        ok = _ffmpeg_upscale_pass(src_path, out_path, encoder, dur, item_id)
+        if not ok and encoder:
+            # GPU path failed (driver/codec edge case) - fall back to CPU once.
+            log.warning(f"GPU encode ({encoder}) failed for {name}, retrying on CPU")
+            bus.emit("upscale_progress",{"id":item_id,"pct":0})
+            try:
+                if os.path.exists(out_path): os.remove(out_path)
+            except Exception: pass
+            ok = _ffmpeg_upscale_pass(src_path, out_path, None, dur, item_id)
+        if ok:
             bus.emit("upscale_done",{"id":item_id,"name":os.path.basename(out_path),"path":out_path})
         else:
             try:
                 if os.path.exists(out_path): os.remove(out_path)
             except Exception: pass
-            bus.emit("upscale_error",{"id":item_id,"name":name,
-                "msg":f"ffmpeg exited with code {proc.returncode}"})
+            bus.emit("upscale_error",{"id":item_id,"name":name,"msg":"ffmpeg failed on both GPU and CPU paths"})
     except Exception as e:
         bus.emit("upscale_error",{"id":item_id,"name":name,"msg":str(e)})
+
+@app.route("/api/gpu_status")
+def api_gpu_status():
+    encoder,label = detect_gpu_encoder()
+    return jsonify({"available":bool(encoder),"encoder":encoder,"label":label})
+
+# -- True AI upscaling via Real-ESRGAN-ncnn-vulkan (adds real detail, GPU-accelerated
+#    via Vulkan). NOT bundled - it's a ~70MB third-party binary+model; auto-detected
+#    if the user has downloaded it. See README "AI Upscale setup". --------------------
+def realesrgan_path():
+    exe_name = "realesrgan-ncnn-vulkan.exe" if sys.platform=="win32" else "realesrgan-ncnn-vulkan"
+    try:
+        base_dir = os.path.dirname(os.path.abspath(
+            sys.executable if getattr(sys,"frozen",False) else os.path.abspath(__file__)))
+    except Exception:
+        base_dir = os.getcwd()
+    local = os.path.join(base_dir,"tools","realesrgan",exe_name)
+    if os.path.exists(local): return local
+    return shutil.which(exe_name)
+
+def ai_upscale_available():
+    return realesrgan_path() is not None
+
+@app.route("/api/ai_upscale_status")
+def api_ai_upscale_status():
+    p = realesrgan_path()
+    return jsonify({"available": p is not None, "path": p})
+
+def _probe_fps(path):
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe: return "30"
+    try:
+        r = subprocess.run([ffprobe,"-v","error","-select_streams","v:0",
+            "-show_entries","stream=r_frame_rate","-of","default=noprint_wrappers=1:nokey=1",path],
+            capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() or "30"
+    except Exception:
+        return "30"
+
+def _run_ai_upscale(item_id, src_path):
+    name=os.path.basename(src_path)
+    resr = realesrgan_path()
+    if not resr:
+        bus.emit("upscale_error",{"id":item_id,"name":name,
+            "msg":"Real-ESRGAN not found. See README 'AI Upscale setup' - it's a one-time manual download (not bundled, ~70MB)."})
+        return
+    if not ffmpeg_available():
+        bus.emit("upscale_error",{"id":item_id,"name":name,"msg":"ffmpeg not found."})
+        return
+    base,_ = os.path.splitext(src_path)
+    out_path = f"{base}_4K_AI.mp4"
+    work = f"{base}_ai_work"
+    frames_in = os.path.join(work,"in"); frames_out = os.path.join(work,"out")
+    try:
+        shutil.rmtree(work, ignore_errors=True)
+        os.makedirs(frames_in, exist_ok=True); os.makedirs(frames_out, exist_ok=True)
+        fps = _probe_fps(src_path)
+        dur = _probe_duration_sec(src_path)
+
+        bus.emit("upscale_start",{"id":item_id,"name":name,
+            "engine":"AI (Real-ESRGAN, GPU) — extracting frames"})
+        bus.emit("upscale_progress",{"id":item_id,"pct":1})
+
+        # 1) Extract every frame as a JPEG (quality 2 = near-lossless)
+        subprocess.run(["ffmpeg","-y","-i",src_path,"-qscale:v","2",
+                         os.path.join(frames_in,"f_%06d.jpg")],
+                        capture_output=True, timeout=1800)
+        total_frames = len([f for f in os.listdir(frames_in) if f.endswith(".jpg")])
+        if total_frames==0:
+            raise RuntimeError("Frame extraction produced no frames - is this a valid video file?")
+
+        # 2) Run Real-ESRGAN over the whole folder; poll output count for progress
+        bus.emit("upscale_progress",{"id":item_id,"pct":3})
+        proc = subprocess.Popen([resr,"-i",frames_in,"-o",frames_out,
+                                  "-n","realesrgan-x4plus","-s","4"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        while proc.poll() is None:
+            done = len(os.listdir(frames_out)) if os.path.exists(frames_out) else 0
+            pct = 3 + min(82, int(done/max(total_frames,1)*82))
+            bus.emit("upscale_progress",{"id":item_id,"pct":pct})
+            time.sleep(1.5)
+        if proc.returncode not in (0,None):
+            raise RuntimeError(f"Real-ESRGAN exited with code {proc.returncode}")
+
+        # 3) Re-encode AI-upscaled frames into a 4K video, reattaching original audio
+        encoder,_ = detect_gpu_encoder()
+        bus.emit("upscale_progress",{"id":item_id,"pct":86})
+        cmd = ["ffmpeg","-y","-framerate",fps,"-i",os.path.join(frames_out,"f_%06d.jpg"),
+               "-i",src_path,"-map","0:v:0","-map","1:a:0?",
+               "-vf","scale=3840:2160:force_original_aspect_ratio=decrease:flags=lanczos,"
+                     "pad=3840:2160:(ow-iw)/2:(oh-ih)/2:color=black",
+               *_venc_args(encoder), "-c:a","aac","-b:a","192k","-shortest",
+               "-progress","pipe:1","-nostats", out_path]
+        proc2 = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                  text=True, bufsize=1)
+        for line in proc2.stdout:
+            line=line.strip()
+            if line.startswith("out_time_ms=") and dur>0:
+                try:
+                    us=int(line.split("=")[1])
+                    pct=86+max(0,min(13,int((us/1_000_000)/dur*13)))
+                    bus.emit("upscale_progress",{"id":item_id,"pct":pct})
+                except Exception: pass
+            elif line=="progress=end":
+                break
+        proc2.wait(timeout=120)
+        if proc2.returncode!=0 or not os.path.exists(out_path) or os.path.getsize(out_path)==0:
+            raise RuntimeError("Final video encode failed")
+
+        bus.emit("upscale_progress",{"id":item_id,"pct":100})
+        bus.emit("upscale_done",{"id":item_id,"name":os.path.basename(out_path),"path":out_path})
+    except Exception as e:
+        bus.emit("upscale_error",{"id":item_id,"name":name,"msg":str(e)})
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+@app.route("/api/ai_upscale", methods=["POST"])
+def api_ai_upscale():
+    data=request.json or {}
+    src=data.get("path",""); item_id=data.get("id","")
+    if not src: return jsonify({"ok":False,"error":"Missing file path"}),400
+    try:
+        real_src=os.path.realpath(src)
+        real_root=os.path.realpath(DOWNLOAD_FOLDER)
+        if not (real_src==real_root or real_src.startswith(real_root+os.sep)):
+            return jsonify({"ok":False,"error":"File must be inside your download folder"}),400
+        if not os.path.exists(real_src):
+            return jsonify({"ok":False,"error":"File not found on disk"}),404
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)}),400
+    if not ai_upscale_available():
+        return jsonify({"ok":False,"error":"Real-ESRGAN not installed. See README 'AI Upscale setup'."}),400
+    if not ffmpeg_available():
+        return jsonify({"ok":False,"error":"ffmpeg not installed or not in PATH"}),400
+    threading.Thread(target=_run_ai_upscale,args=(item_id,real_src),daemon=True).start()
+    return jsonify({"ok":True})
 
 @app.route("/api/ffmpeg_status")
 def api_ffmpeg_status():
@@ -1688,6 +1945,7 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
         <button class="vtab active" id="vt-grid" onclick="setView('grid')" title="Grid view">⊞</button>
         <button class="vtab" id="vt-list" onclick="setView('list')" title="List view">☰</button>
       </div>
+      <button class="tb-btn" id="refresh-media-btn" onclick="refreshMedia()" title="Reload this chat's media from scratch">🔄 Refresh</button>
       <div class="tb-spacer"></div>
       <span id="sel-info">0 selected</span>
       <button class="tb-btn" onclick="selectAll()" title="Ctrl+A">☑ All</button>
@@ -1719,7 +1977,7 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
           <div class="dlv-section-title">✅ Completed this session <span id="dlv-completed-count">0</span>
             <button class="tb-btn" style="margin-left:auto" onclick="exportHistory()">⬇ Export CSV</button>
           </div>
-          <div class="dlv-note">"Upscale to 4K" resizes video to 3840×2160 using FFmpeg (Lanczos interpolation) - it sharpens and smooths, but it doesn't invent detail the source doesn't have. Requires <a href="https://ffmpeg.org/download.html" target="_blank" rel="noopener">ffmpeg</a> installed and on your system PATH.</div>
+          <div class="dlv-note">"Upscale to 4K" resizes video to 3840×2160 using FFmpeg (Lanczos interpolation) - it sharpens and smooths, but it doesn't invent detail the source doesn't have. Requires <a href="https://ffmpeg.org/download.html" target="_blank" rel="noopener">ffmpeg</a> installed and on your system PATH. <span id="gpu-status-note">Checking for GPU acceleration…</span></div>
           <div id="dlv-completed-list" class="dlv-list"><div class="dlv-empty">No completed downloads yet this session</div></div>
         </div>
       </div>
@@ -1916,7 +2174,7 @@ const S = {
   sidebarTab:'all', currentChat:null, media:[], selected:new Set(),
   filter:'all', sortBy:'date-desc', minId:0, loading:false,
   dlActive:false, curDlId:null, activeDl:new Map(), paused:false,
-  queueRemaining:0, completedLog:[],
+  queueRemaining:0, completedLog:[], gpuChecked:false, upscaleMode:new Map(),
   statsVisible:false, sidebarOpen:true,
   theme:_ls('apex-theme','dark'),
   viewMode:_ls('apex-view','grid'),
@@ -2201,27 +2459,33 @@ function startSSE(){
   });
   es.addEventListener('upscale_start',e=>{
     const d=JSON.parse(e.data);
-    toast('🎞 Upscaling "'+d.name+'" to 4K…','s',5000);
-    const btn=document.getElementById('dlv-upscale-btn-'+d.id);
+    toast('🎞 Upscaling "'+d.name+'" to 4K via '+(d.engine||'ffmpeg')+'…','s',6000);
+    const mode=S.upscaleMode.get(String(d.id))||'fast';
+    const btn=document.getElementById((mode==='ai'?'dlv-ai-upscale-btn-':'dlv-upscale-btn-')+d.id);
     if(btn){ btn.disabled=true; btn.textContent='⏳ 0%'; }
   });
   es.addEventListener('upscale_progress',e=>{
     const d=JSON.parse(e.data);
-    const btn=document.getElementById('dlv-upscale-btn-'+d.id);
+    const mode=S.upscaleMode.get(String(d.id))||'fast';
+    const btn=document.getElementById((mode==='ai'?'dlv-ai-upscale-btn-':'dlv-upscale-btn-')+d.id);
     if(btn){ btn.textContent='⏳ '+d.pct+'%'; }
   });
   es.addEventListener('upscale_done',e=>{
     const d=JSON.parse(e.data);
     toast('✅ 4K upscale finished: '+d.name,'s',7000);
     addNotif('🎞','4K upscale complete',d.name);
-    const btn=document.getElementById('dlv-upscale-btn-'+d.id);
+    const mode=S.upscaleMode.get(String(d.id))||'fast';
+    const btn=document.getElementById((mode==='ai'?'dlv-ai-upscale-btn-':'dlv-upscale-btn-')+d.id);
     if(btn){ btn.disabled=true; btn.textContent='✅ Done'; }
+    S.upscaleMode.delete(String(d.id));
   });
   es.addEventListener('upscale_error',e=>{
     const d=JSON.parse(e.data);
     toast('❌ 4K upscale failed: '+(d.msg||'unknown error'),'e',9000);
-    const btn=document.getElementById('dlv-upscale-btn-'+d.id);
-    if(btn){ btn.disabled=false; btn.textContent='⬆ Upscale to 4K'; }
+    const mode=S.upscaleMode.get(String(d.id))||'fast';
+    const btn=document.getElementById((mode==='ai'?'dlv-ai-upscale-btn-':'dlv-upscale-btn-')+d.id);
+    if(btn){ btn.disabled=false; btn.textContent=(mode==='ai'?'🧠 AI Upscale':'⬆ Upscale to 4K'); }
+    S.upscaleMode.delete(String(d.id));
   });
   es.onerror=()=>{ if(S.connected) setConn('connecting','Reconnecting...'); };
 }
@@ -2377,7 +2641,7 @@ async function openChat(chatId,chatName){
   await loadMedia();
 }
 
-async function loadMedia(){
+async function loadMedia(forceRefresh){
   if(!S.currentChat||S.loading) return;
   S.loading=true;
   const grid=document.getElementById('media-grid');
@@ -2387,7 +2651,8 @@ async function loadMedia(){
   }
   let data;
   try{
-    const r=await fetch(`/api/media/${S.currentChat.id}?limit=50&before_id=${S.minId}`);
+    const refreshQ = forceRefresh ? '&refresh=1' : '';
+    const r=await fetch(`/api/media/${S.currentChat.id}?limit=50&before_id=${S.minId}${refreshQ}`);
     if(!r.ok) throw new Error('HTTP '+r.status);
     data=await r.json();
   }catch(e){
@@ -2529,6 +2794,17 @@ function loadThumbs(items){
   });
 }
 
+async function refreshMedia(){
+  if(!S.currentChat) return;
+  const btn=document.getElementById('refresh-media-btn');
+  if(btn){ btn.disabled=true; btn.textContent='⏳ Refreshing…'; }
+  S.media=[]; S.minId=0; S.selected.clear();
+  S.typeCounts={all:0,video:0,photo:0,audio:0,document:0};
+  document.getElementById('media-grid').innerHTML='';
+  document.getElementById('empty-state').style.display='none';
+  await loadMedia(true);
+  if(btn){ btn.disabled=false; btn.textContent='🔄 Refresh'; }
+}
 async function loadMore(){
   const btn=document.getElementById('load-more-btn');
   if(btn){ btn.disabled=true; btn.dataset.prevText=btn.textContent; btn.textContent='⏳ Loading…'; }
@@ -2706,10 +2982,22 @@ function toggleDownloadsView(){
     document.getElementById('empty-state').style.display='none';
     lm.style.display='none';
     renderDownloadsView();
+    checkGpuStatus();
   } else {
     if(!S.currentChat) document.getElementById('empty-state').style.display='flex';
   }
   document.getElementById('downloads-nav-btn').classList.toggle('active-nav',open);
+}
+async function checkGpuStatus(){
+  if(S.gpuChecked) return;
+  S.gpuChecked=true;
+  const note=document.getElementById('gpu-status-note');
+  try{
+    const d=await fetch('/api/gpu_status').then(r=>r.json());
+    if(note) note.textContent = d.available
+      ? `⚡ GPU acceleration active: ${d.label} — upscales will be much faster.`
+      : 'No GPU encoder detected — using CPU (slower). NVIDIA/Intel/AMD drivers with hardware encoding will be used automatically if present.';
+  }catch(e){ if(note) note.textContent=''; }
 }
 function updateDlNavBadge(){
   const b=document.getElementById('dl-nav-badge');
@@ -2749,7 +3037,8 @@ function renderDownloadsView(){
         <span class="dlv-name" title="${escHtml(row.name)}">✅ ${escHtml(row.name)}</span>
         <span class="dlv-meta">${row.size_mb} MB</span>
         <span class="dlv-meta">${esc(row.time)}</span>
-        ${isVideoFile(row.name)?`<button class="tb-btn" id="dlv-upscale-btn-${row.id}" style="padding:4px 10px;font-size:11px" onclick="upscale4k('${row.id}')">⬆ Upscale to 4K</button>`:''}
+        ${isVideoFile(row.name)?`<button class="tb-btn" id="dlv-upscale-btn-${row.id}" style="padding:4px 10px;font-size:11px" onclick="upscale4k('${row.id}')" title="Fast GPU resize to 4K">⬆ Upscale to 4K</button>
+        <button class="tb-btn" id="dlv-ai-upscale-btn-${row.id}" style="padding:4px 10px;font-size:11px" onclick="aiUpscale4k('${row.id}')" title="Slower - true AI detail enhancement via Real-ESRGAN">🧠 AI Upscale</button>`:''}
       </div>`).join('');
   }
 }
@@ -2761,6 +3050,7 @@ async function upscale4k(id){
     toast('ffmpeg not found. Install it from ffmpeg.org and add it to your PATH to use upscaling.','e',9000);
     return;
   }
+  S.upscaleMode.set(String(id),'fast');
   const btn=document.getElementById('dlv-upscale-btn-'+id);
   if(btn){ btn.disabled=true; btn.textContent='⏳ Starting…'; }
   const r=await fetch('/api/upscale',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -2771,6 +3061,33 @@ async function upscale4k(id){
     if(btn){ btn.disabled=false; btn.textContent='⬆ Upscale to 4K'; }
   } else {
     toast('Upscaling to 4K started — this can take a while for long videos','s',6000);
+  }
+}
+async function aiUpscale4k(id){
+  const item=S.completedLog.find(r=>String(r.id)===String(id));
+  if(!item){ toast('Item not found','e'); return; }
+  const check=await fetch('/api/ai_upscale_status').then(r=>r.json()).catch(()=>({available:false}));
+  if(!check.available){
+    toast('Real-ESRGAN not installed. See the README "AI Upscale setup" section — one-time download, not bundled with the app.','e',12000);
+    return;
+  }
+  const ffCheck=await fetch('/api/ffmpeg_status').then(r=>r.json()).catch(()=>({available:false}));
+  if(!ffCheck.available){
+    toast('ffmpeg not found. Install it from ffmpeg.org and add it to your PATH.','e',9000);
+    return;
+  }
+  if(!confirm('AI upscaling processes every frame individually — much slower than the fast 4K resize, and best for short clips. Continue?')) return;
+  S.upscaleMode.set(String(id),'ai');
+  const btn=document.getElementById('dlv-ai-upscale-btn-'+id);
+  if(btn){ btn.disabled=true; btn.textContent='⏳ Starting…'; }
+  const r=await fetch('/api/ai_upscale',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({id:item.id,path:item.path})});
+  const d=await r.json().catch(()=>({ok:false}));
+  if(!d.ok){
+    toast('AI upscale failed to start: '+(d.error||'unknown error'),'e',8000);
+    if(btn){ btn.disabled=false; btn.textContent='🧠 AI Upscale'; }
+  } else {
+    toast('AI upscaling started — this processes every frame and will take a while','s',7000);
   }
 }
 
@@ -2798,12 +3115,13 @@ function previewItem(id){
   const item=S.media.find(m=>m.id===id); if(!item) return;
   S.previewItem=item;
   const wrap=document.getElementById('preview-wrap');
+  const streamUrl=`/api/stream/${id}?type=${encodeURIComponent(item.type)}&name=${encodeURIComponent(item.orig_name||'')}`;
   if(item.type==='photo'){
     wrap.innerHTML=`<img src="/api/thumb/${id}" style="width:100%;max-height:60vh;object-fit:contain;border-radius:10px;animation:fadeIn .3s ease">`;
   } else if(item.type==='video'){
-    wrap.innerHTML=`<video controls style="width:100%;max-height:60vh;border-radius:10px;background:#000;animation:fadeIn .3s ease"><source src="/api/thumb/${id}"><p style="color:var(--tx3);text-align:center;padding:24px">Preview unavailable — download to watch.</p></video>`;
+    wrap.innerHTML=`<video controls preload="metadata" style="width:100%;max-height:60vh;border-radius:10px;background:#000;animation:fadeIn .3s ease"><source src="${streamUrl}" type="${item.mime||'video/mp4'}"><p style="color:var(--tx3);text-align:center;padding:24px">Preview unavailable — download to watch.</p></video>`;
   } else if(item.type==='audio'){
-    wrap.innerHTML=`<div style="background:var(--bg2);border-radius:12px;padding:32px;text-align:center;animation:fadeIn .3s ease"><div style="font-size:56px;margin-bottom:16px;animation:float 2s ease-in-out infinite">🎵</div><audio controls style="width:100%;margin-top:8px"><source src="/api/thumb/${id}"></audio></div>`;
+    wrap.innerHTML=`<div style="background:var(--bg2);border-radius:12px;padding:32px;text-align:center;animation:fadeIn .3s ease"><div style="font-size:56px;margin-bottom:16px;animation:float 2s ease-in-out infinite">🎵</div><audio controls preload="metadata" style="width:100%;margin-top:8px"><source src="${streamUrl}" type="${item.mime||'audio/mpeg'}"></audio></div>`;
   } else {
     wrap.innerHTML=`<div style="background:var(--bg2);border-radius:12px;padding:48px;text-align:center;animation:fadeIn .3s ease"><div style="font-size:56px;animation:float 2s ease-in-out infinite">📄</div><div style="color:var(--tx3);font-size:13px;margin-top:12px">No preview available for this file type</div></div>`;
   }
