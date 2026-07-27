@@ -204,6 +204,26 @@ bus = EventBus()
 # -- Turbo Downloader ----------------------------------------------------------
 CHUNK_MIN = 128*1024; CHUNK_MAX = 8*1024*1024; PAR_MIN = 8*1024*1024
 
+def _verify_media_integrity(path):
+    """Best-effort corruption check via ffprobe: catches files that have the
+    right byte count but a broken/unreadable container (e.g. a segment-boundary
+    mismatch in parallel downloads). Returns True (assume OK) if ffprobe isn't
+    installed, since we can't verify either way - this is a bonus safety net,
+    not the only line of defense."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe: return True
+    try:
+        r = subprocess.run(
+            [ffprobe,"-v","error","-show_entries","format=duration",
+             "-of","default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=20)
+        if r.returncode != 0: return False
+        if r.stderr.strip(): return False
+        dur_str = r.stdout.strip()
+        return bool(dur_str) and float(dur_str) > 0
+    except Exception:
+        return True  # verification itself failed - don't punish the download for that
+
 class TurboDownloader:
     def __init__(self, client):
         self.client  = client
@@ -213,7 +233,7 @@ class TurboDownloader:
 
     def cancel(self, msg_id): self._cancel.add(msg_id)
 
-    async def download(self, msg, filepath, on_prog=None):
+    async def download(self, msg, filepath, on_prog=None, mtype=None):
         if not msg.media: return None
         self._active_streams += 1
         try:
@@ -227,7 +247,7 @@ class TurboDownloader:
                 try:
                     if is_doc and size >= PAR_MIN:
                         try:
-                            return await asyncio.wait_for(self._parallel(msg,filepath,size,on_prog), timeout=900)
+                            return await asyncio.wait_for(self._parallel(msg,filepath,size,on_prog,mtype), timeout=900)
                         except asyncio.CancelledError:
                             raise
                         except Exception as e:
@@ -236,7 +256,7 @@ class TurboDownloader:
                         try:
                             if os.path.exists(filepath): os.remove(filepath)
                         except Exception: pass
-                    return await asyncio.wait_for(self._stream(msg,filepath,size,on_prog), timeout=3600)
+                    return await asyncio.wait_for(self._stream(msg,filepath,size,on_prog,mtype), timeout=3600)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -270,7 +290,7 @@ class TurboDownloader:
         share = max(1, self._active_streams)
         return n/((BANDWIDTH_KBPS/share)*1024)
 
-    async def _stream(self, msg, filepath, size, on_prog):
+    async def _stream(self, msg, filepath, size, on_prog, mtype=None):
         done=0; start=time.monotonic(); samples=deque(maxlen=8)
         cs=REQ_SIZE; tmp=filepath+".tmp"
         try:
@@ -292,6 +312,8 @@ class TurboDownloader:
                         on_prog(pct,spd2,done,size,eta)
             if size and done < size:
                 raise IOError(f"Incomplete download: got {done} of {size} bytes (connection likely dropped early)")
+            if mtype in ("video","audio") and not _verify_media_integrity(tmp):
+                raise IOError("Downloaded file failed integrity check (corrupt/unreadable media container)")
             if os.path.exists(filepath): os.remove(filepath)
             os.rename(tmp,filepath)
         except Exception:
@@ -338,7 +360,7 @@ class TurboDownloader:
             except Exception as e:
                 log.error(f"Seg {idx} fatal: {e}"); raise
 
-    async def _parallel(self, msg, filepath, size, on_prog):
+    async def _parallel(self, msg, filepath, size, on_prog, mtype=None):
         n=min(WORKERS,8); ALIGN=4096
         seg=((size+n-1)//n); seg=((seg+ALIGN-1)//ALIGN)*ALIGN
         parts=filepath+".parts"; os.makedirs(parts,exist_ok=True)
@@ -366,6 +388,12 @@ class TurboDownloader:
                 try: os.remove(tmp)
                 except Exception: pass
                 raise IOError(f"Incomplete assembled download: got {final_size} of {size} bytes")
+            if mtype in ("video","audio") and not _verify_media_integrity(tmp):
+                shutil.rmtree(parts,ignore_errors=True)
+                try: os.remove(tmp)
+                except Exception: pass
+                raise IOError("Assembled file failed integrity check (corrupt/unreadable media container - "
+                               "likely a segment-boundary mismatch in parallel download)")
             shutil.rmtree(parts,ignore_errors=True)
             if os.path.exists(filepath): os.remove(filepath)
             os.rename(tmp,filepath)
@@ -592,7 +620,7 @@ class Backend:
                 else:    await self.client.download_media(msg,file=path)
             else:
                 if self.turbo is None: raise RuntimeError("Not connected")
-                await self.turbo.download(msg,path,on_prog)
+                await self.turbo.download(msg,path,on_prog,mtype)
         finally:
             if acquired: self._sema.release()
         mark_done(msg.id)
@@ -810,19 +838,55 @@ def api_media(chat_id):
     return jsonify({"items":result_holder[0] or []})
 
 # Thumbnails
+def _locate_downloaded_path(msg_id):
+    """Find an already-downloaded file for this message id, either from this
+    session's download log or by reconstructing the expected path from any
+    cached media item (covers files downloaded in a previous session)."""
+    log_entry = next((r for r in state.download_log if r["id"]==msg_id), None)
+    if log_entry and log_entry.get("path") and os.path.exists(log_entry["path"]):
+        return log_entry["path"]
+    for items in state.media_cache.values():
+        for it in items:
+            if it.get("id")==msg_id and it.get("orig_name"):
+                sub={"video":"videos","photo":"photos","audio":"audios","document":"docs"}.get(it.get("type"),"docs")
+                base_path=os.path.join(DOWNLOAD_FOLDER,sub,it["orig_name"])
+                b,e=os.path.splitext(base_path)
+                for cand in (base_path, f"{b}_{msg_id}{e}"):
+                    if os.path.exists(cand) and os.path.getsize(cand)>0:
+                        return cand
+    return None
+
+def _generate_thumb_ffmpeg(src_path, out_path):
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg: return False
+    try:
+        r = subprocess.run(
+            [ffmpeg,"-y","-i",src_path,"-ss","00:00:01.000","-vframes","1",
+             "-vf","scale=320:-1", out_path],
+            capture_output=True, timeout=20)
+        return r.returncode==0 and os.path.exists(out_path) and os.path.getsize(out_path)>0
+    except Exception:
+        return False
+
 @app.route("/api/thumb/<int:msg_id>")
 def api_thumb(msg_id):
     p=os.path.join(THUMB_DIR,f"t{msg_id}.jpg")
     if os.path.exists(p) and os.path.getsize(p)>0:
         return send_file(p,mimetype="image/jpeg")
     msg=state.msg_cache.get(msg_id)
-    if not msg: return "",404
-    done_ev=threading.Event(); path_holder=[None]
-    def on_each(iid,path): path_holder[0]=path; done_ev.set()
-    state.be.get_thumbs([(msg,msg_id)],on_each)
-    done_ev.wait(timeout=15)
-    if path_holder[0] and os.path.exists(path_holder[0]):
-        return send_file(path_holder[0],mimetype="image/jpeg")
+    if msg:
+        done_ev=threading.Event(); path_holder=[None]
+        def on_each(iid,path): path_holder[0]=path; done_ev.set()
+        state.be.get_thumbs([(msg,msg_id)],on_each)
+        done_ev.wait(timeout=15)
+        if path_holder[0] and os.path.exists(path_holder[0]):
+            return send_file(path_holder[0],mimetype="image/jpeg")
+    # Telegram-side thumbnail missing entirely - if the file is already
+    # downloaded, generate a real thumbnail locally instead of showing nothing.
+    local_path=_locate_downloaded_path(msg_id)
+    if local_path and local_path.lower().endswith((".mp4",".mkv",".mov",".avi",".webm",".m4v")):
+        if _generate_thumb_ffmpeg(local_path, p):
+            return send_file(p,mimetype="image/jpeg")
     return "",404
 
 async def _anext_or_none(agen):

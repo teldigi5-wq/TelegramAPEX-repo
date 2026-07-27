@@ -19,7 +19,8 @@ preview media, and download photos/videos/audio/documents in parallel — fast.
 - **Concurrent downloads** — several files at once (configurable), not one-at-a-time
 - Adaptive chunked + parallel-segment downloading for large files, chunk size scales up to 8MB on sustained fast links
 - **"5G Ultra" preset** — 8 connections / 8 concurrent files, tuned for high-bandwidth mobile or fiber connections (plus the original Turbo/Balanced/Safe presets)
-- Downloads are verified for completeness (size-checked) before being marked done, with automatic retry on a dropped connection
+- Downloads are verified for completeness (size-checked) **and structural integrity** (ffprobe-checked, catches a same-size-but-corrupt file from a segment-boundary mismatch in parallel downloads) before being marked done, with automatic retry on failure
+- Thumbnails now generate locally via ffmpeg for already-downloaded videos whose Telegram-side thumbnail is missing, instead of showing nothing
 - **"Upscale to 4K"** on any completed video (Downloads tab) — resizes to 3840×2160 via FFmpeg/Lanczos, GPU-accelerated (NVENC/QuickSync/AMF) when available. This sharpens/smooths but does **not** add AI-generated detail; requires [ffmpeg](https://ffmpeg.org/download.html) installed and on your PATH
 - **"AI Upscale"** — a slower, heavier alternative that adds real detail via [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan) (GPU-accelerated, frame-by-frame). Optional manual setup — see below
 - Working video/audio preview — plays the actual file (streamed live from Telegram if not downloaded yet, with seek support) instead of failing silently
