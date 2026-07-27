@@ -12,11 +12,18 @@ preview media, and download photos/videos/audio/documents in parallel — fast.
 
 - Browse all your Telegram chats/channels and their media in a fast local web UI
 - **Downloads tab** — a dedicated view showing active downloads (live progress), how many are queued, and a session history of completed downloads, separate from the media browser
+- **Proper tab navigation** — Media / Downloads / Stats / Settings, replacing the old icon-toggle buttons
+- **★ Favorites** — star any media item to save it, with a dedicated Favorites filter; persists across restarts
+- **Stats tab** — session totals, a live speed graph, and a media-type breakdown, in a full dashboard view
+- Media search box now actually works (was silently broken - called a function that didn't exist)
 - **Concurrent downloads** — several files at once (configurable), not one-at-a-time
 - Adaptive chunked + parallel-segment downloading for large files, chunk size scales up to 8MB on sustained fast links
 - **"5G Ultra" preset** — 8 connections / 8 concurrent files, tuned for high-bandwidth mobile or fiber connections (plus the original Turbo/Balanced/Safe presets)
 - Downloads are verified for completeness (size-checked) before being marked done, with automatic retry on a dropped connection
-- **"Upscale to 4K"** on any completed video (Downloads tab) — resizes to 3840×2160 via FFmpeg/Lanczos. This sharpens/smooths but does **not** add AI-generated detail; requires [ffmpeg](https://ffmpeg.org/download.html) installed and on your PATH
+- **"Upscale to 4K"** on any completed video (Downloads tab) — resizes to 3840×2160 via FFmpeg/Lanczos, GPU-accelerated (NVENC/QuickSync/AMF) when available. This sharpens/smooths but does **not** add AI-generated detail; requires [ffmpeg](https://ffmpeg.org/download.html) installed and on your PATH
+- **"AI Upscale"** — a slower, heavier alternative that adds real detail via [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan) (GPU-accelerated, frame-by-frame). Optional manual setup — see below
+- Working video/audio preview — plays the actual file (streamed live from Telegram if not downloaded yet, with seek support) instead of failing silently
+- **🔄 Refresh button** on the media view to force a clean reload if a chat's media doesn't show up
 - **Load more** pagination fixed to correctly fetch older media instead of re-fetching the same page, with a loading state and running item count
 - Lazy-loaded thumbnails (only fetch thumbnails for cards actually scrolled into view) — noticeably faster on large chats
 - Thumbnails no longer fall back to downloading entire videos/documents just to generate a preview
@@ -87,6 +94,28 @@ npm start
 ```
 This runs the backend via `python TelegramAPEX_v9.py` directly (no PyInstaller step) inside
 an Electron window — fast to iterate on.
+
+## 🧠 AI Upscale setup (optional)
+
+The fast "Upscale to 4K" button works out of the box (just needs ffmpeg). The **AI Upscale**
+button needs one extra one-time download, since it's a ~70MB third-party binary + model that
+isn't bundled with this repo:
+
+1. Download the Windows build from the official releases page:
+   **https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan/releases**
+   (grab the asset with "windows" in its name, e.g. `realesrgan-ncnn-vulkan-*-windows.zip`)
+2. Extract the zip.
+3. Create this folder next to `TelegramAPEX_v9.py` (or next to the built `.exe`):
+   `tools\realesrgan\`
+4. Copy everything from the extracted zip into that folder, so you end up with:
+   ```
+   tools\realesrgan\realesrgan-ncnn-vulkan.exe
+   tools\realesrgan\models\  (folder with the .bin/.param model files)
+   ```
+5. Restart the app. The Downloads tab will detect it automatically — no config needed.
+
+That's it — no separate install, no PATH changes. If you'd rather install it system-wide
+instead, putting `realesrgan-ncnn-vulkan.exe` anywhere on your PATH also works.
 
 ## 🔒 Security — read this before pushing to GitHub
 

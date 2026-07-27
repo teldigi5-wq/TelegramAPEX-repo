@@ -153,6 +153,16 @@ _dl_db: set = set(_lj(DL_DB_FILE, []))
 def is_done(i):   return str(i) in _dl_db
 def mark_done(i): _dl_db.add(str(i)); _sj(DL_DB_FILE, list(_dl_db))
 
+FAV_DB_FILE = os.path.join(_DIR, "favorites_v10.json")
+_fav_db: set = set(_lj(FAV_DB_FILE, []))
+def is_fav(i): return str(i) in _fav_db
+def toggle_fav(i):
+    s=str(i)
+    if s in _fav_db: _fav_db.discard(s); on=False
+    else: _fav_db.add(s); on=True
+    _sj(FAV_DB_FILE, list(_fav_db))
+    return on
+
 def persist_q(items):
     _sj(QUEUE_FILE, [{"id":x["id"],"chat_id":x["chat_id"],"type":x["type"],
                       "orig_name":x.get("orig_name",""),"size_mb":x.get("size_mb",0)} for x in items])
@@ -791,6 +801,7 @@ def api_media(chat_id):
             if item["id"] in existing_ids: continue  # skip dupes across pages
             if msg: state.msg_cache[item["id"]]=msg
             item["done"]=is_done(item["id"])
+            item["favorite"]=is_fav(item["id"])
             safe.append(item)
         state.media_cache[chat_id].extend(safe)
         result_holder[0]=safe; done_ev.set()
@@ -1040,6 +1051,14 @@ def api_open_folder():
         else:                        subprocess.Popen(["xdg-open",folder])
     except Exception as e: return jsonify({"ok":False,"error":str(e)})
     return jsonify({"ok":True})
+
+@app.route("/api/favorite", methods=["POST"])
+def api_favorite():
+    data=request.json or {}
+    item_id=data.get("id")
+    if item_id is None: return jsonify({"ok":False,"error":"Missing id"}),400
+    on=toggle_fav(item_id)
+    return jsonify({"ok":True,"favorite":on})
 
 @app.route("/api/clear_history", methods=["POST"])
 def api_clear_history():
@@ -1453,11 +1472,11 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
   background-size:400% 100%;animation:gradFlow 8s ease infinite;pointer-events:none;z-index:-1}
 
 /* ===================== STATS BAR ===================== */
-#stats-bar{background:linear-gradient(135deg,var(--bg1),var(--bg2));
-  border-bottom:1px solid var(--gb);padding:10px 20px;
-  display:none;grid-template-columns:repeat(4,1fr);gap:14px;flex-shrink:0;
-  animation:slideDown .25s ease}
-#stats-bar.visible{display:grid}
+#stats-bar{padding:24px;display:none;flex-direction:column;gap:22px;max-width:900px;margin:0 auto;width:100%;
+  animation:fadeIn .25s ease}
+.stats-dashboard-hdr h2{font-size:19px;font-weight:900;margin:0 0 2px}
+.stats-dashboard-hdr .sub{font-size:12px;color:var(--tx3)}
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
 .stat-c{background:var(--bg3);border-radius:10px;padding:10px 14px;border:1px solid var(--gb);
   transition:var(--tr);position:relative;overflow:hidden}
 .stat-c:hover{border-color:var(--acc);transform:translateY(-1px)}
@@ -1470,6 +1489,28 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
 .stat-mini-bar{height:3px;background:var(--bg4);border-radius:2px;margin-top:6px;overflow:hidden}
 .stat-mini-fill{height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2));border-radius:2px;
   transition:width .6s cubic-bezier(.4,0,.2,1)}
+.stats-breakdown{background:var(--bg2);border:1px solid var(--gb);border-radius:12px;padding:16px}
+.stats-breakdown-hdr{font-size:12px;font-weight:800;color:var(--tx2);margin-bottom:12px;letter-spacing:.3px}
+.sb-row{display:flex;align-items:center;gap:10px;margin-bottom:9px}
+.sb-label{font-size:12px;color:var(--tx2);width:90px;flex-shrink:0}
+.sb-count{font-size:12px;color:var(--tx1);font-weight:700;width:32px;text-align:right;flex-shrink:0;font-variant-numeric:tabular-nums}
+.stats-speed-panel{background:var(--bg2);border:1px solid var(--gb);border-radius:12px;padding:16px}
+.stats-speed-panel canvas{width:100%;height:90px;border-radius:8px}
+
+/* ===================== MAIN TAB BAR ===================== */
+#main-tabs{display:flex;align-items:center;gap:2px;padding:0 20px;background:var(--bg1);
+  border-bottom:1px solid var(--gb);flex-shrink:0;position:relative}
+.main-tab{background:none;border:none;color:var(--tx3);font-size:13px;font-weight:700;
+  padding:13px 18px;cursor:pointer;display:flex;align-items:center;gap:7px;
+  position:relative;transition:color .18s ease;white-space:nowrap}
+.main-tab-ico{font-size:14px}
+.main-tab:hover{color:var(--tx1)}
+.main-tab.active{color:var(--acc)}
+.main-tab .badge{position:static;margin-left:2px;background:var(--red);color:#fff;
+  border-radius:8px;padding:1px 6px;font-size:9px;font-weight:800}
+.main-tab-indicator{position:absolute;bottom:0;left:0;height:2.5px;width:0;
+  background:linear-gradient(90deg,var(--acc),var(--acc2));border-radius:2px;
+  transition:left .25s cubic-bezier(.4,0,.2,1),width .25s cubic-bezier(.4,0,.2,1)}
 
 /* ===================== SIDEBAR ===================== */
 #sidebar-header{padding:10px 12px;border-bottom:1px solid var(--gb);flex-shrink:0;display:flex;flex-direction:column;gap:8px}
@@ -1618,6 +1659,13 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
   display:flex;align-items:center;justify-content:center;font-size:11px;
   z-index:5;transition:all .18s ease;color:transparent}
 .media-card.selected .card-sel{background:var(--acc);border-color:var(--acc);color:#000;transform:scale(1.1)}
+.card-star{position:absolute;bottom:7px;left:7px;width:24px;height:24px;border-radius:50%;
+  border:none;background:rgba(0,0,0,.45);backdrop-filter:blur(6px);color:rgba(255,255,255,.5);
+  font-size:13px;display:flex;align-items:center;justify-content:center;cursor:pointer;
+  z-index:6;transition:all .18s ease;line-height:1}
+.card-star:hover{background:rgba(0,0,0,.65);color:#fbbf24;transform:scale(1.15)}
+.card-star.on{color:#fbbf24;background:rgba(251,191,36,.18)}
+
 
 /* Card body */
 .card-body{padding:10px 12px;display:flex;flex-direction:column;gap:5px;flex:1}
@@ -1866,41 +1914,29 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
     <button class="icon-btn" title="Notifications" onclick="toggleNotif()" id="notif-btn">
       🔔<span class="badge" id="notif-badge" style="display:none">0</span>
     </button>
-    <button class="icon-btn" title="Downloads" onclick="toggleDownloadsView()" id="downloads-nav-btn">
-      ⬇<span class="badge" id="dl-nav-badge" style="display:none">0</span>
-    </button>
-    <button class="icon-btn" title="Statistics" onclick="toggleStats()" id="stats-btn">📊</button>
     <button class="icon-btn" title="Open Download Folder" onclick="openFolder()">📂</button>
     <button class="icon-btn" title="Toggle Sidebar" onclick="toggleSidebar()">☰</button>
     <input id="media-search-inp" class="search-inp" placeholder="🔍 Search media..." style="width:170px;margin-right:6px;padding:5px 10px;font-size:12px;border-radius:8px;border:1px solid var(--gb);background:var(--bg3);color:var(--tx1);" oninput="searchMedia()" autocomplete="off">
 <button class="icon-btn" title="Reconnect to Telegram" onclick="reconnect()" style="margin-right:2px">🔄</button>
-<button class="icon-btn" title="Settings" onclick="showSettings()">⚙️</button>
     <button class="icon-btn" title="Toggle Theme" onclick="toggleTheme()">🌙</button>
   </div>
 </div>
 
-<!-- STATS BAR -->
-<div id="stats-bar">
-  <div class="stat-c">
-    <div class="stat-l">Files Downloaded</div>
-    <div class="stat-v a" id="st-files">0</div>
-    <div class="stat-mini-bar"><div class="stat-mini-fill" id="smf-files" style="width:0%"></div></div>
-  </div>
-  <div class="stat-c">
-    <div class="stat-l">Total Size</div>
-    <div class="stat-v" id="st-size">0 MB</div>
-    <div class="stat-mini-bar"><div class="stat-mini-fill" id="smf-size" style="width:0%;background:linear-gradient(90deg,var(--acc3),var(--grn))"></div></div>
-  </div>
-  <div class="stat-c">
-    <div class="stat-l">Avg Speed</div>
-    <div class="stat-v g" id="st-spd">—</div>
-    <div class="stat-mini-bar"><div class="stat-mini-fill" id="smf-spd" style="width:0%;background:linear-gradient(90deg,var(--grn),var(--yel))"></div></div>
-  </div>
-  <div class="stat-c">
-    <div class="stat-l">Session Time</div>
-    <div class="stat-v" id="st-time">0m 00s</div>
-    <canvas id="mini-speed-chart" width="120" height="32" style="margin-top:4px;border-radius:4px"></canvas>
-  </div>
+<!-- MAIN TABS -->
+<div id="main-tabs">
+  <button class="main-tab active" data-tab="media" onclick="switchTab('media')">
+    <span class="main-tab-ico">📁</span> Media
+  </button>
+  <button class="main-tab" data-tab="downloads" onclick="switchTab('downloads')">
+    <span class="main-tab-ico">⬇</span> Downloads<span class="badge" id="dl-nav-badge" style="display:none">0</span>
+  </button>
+  <button class="main-tab" data-tab="stats" onclick="switchTab('stats')">
+    <span class="main-tab-ico">📊</span> Stats
+  </button>
+  <button class="main-tab" data-tab="settings" onclick="switchTab('settings')">
+    <span class="main-tab-ico">⚙️</span> Settings
+  </button>
+  <div class="main-tab-indicator" id="main-tab-indicator"></div>
 </div>
 
 <div id="body">
@@ -1930,6 +1966,7 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
     <div id="toolbar">
       <div class="filter-tabs">
         <button class="ftab active" data-f="all" onclick="setFilter(this)">All <span class="cnt" id="cnt-all"></span></button>
+        <button class="ftab" data-f="favorite" onclick="setFilter(this)">★ Favorites <span class="cnt" id="cnt-favorite"></span></button>
         <button class="ftab" data-f="video" onclick="setFilter(this)">🎬 Video <span class="cnt" id="cnt-video"></span></button>
         <button class="ftab" data-f="photo" onclick="setFilter(this)">🖼 Photo <span class="cnt" id="cnt-photo"></span></button>
         <button class="ftab" data-f="audio" onclick="setFilter(this)">🎵 Audio <span class="cnt" id="cnt-audio"></span></button>
@@ -1979,6 +2016,45 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
           </div>
           <div class="dlv-note">"Upscale to 4K" resizes video to 3840×2160 using FFmpeg (Lanczos interpolation) - it sharpens and smooths, but it doesn't invent detail the source doesn't have. Requires <a href="https://ffmpeg.org/download.html" target="_blank" rel="noopener">ffmpeg</a> installed and on your system PATH. <span id="gpu-status-note">Checking for GPU acceleration…</span></div>
           <div id="dlv-completed-list" class="dlv-list"><div class="dlv-empty">No completed downloads yet this session</div></div>
+        </div>
+      </div>
+      <div id="stats-bar" style="display:none">
+        <div class="stats-dashboard-hdr">
+          <h2>📊 Session Statistics</h2>
+          <div class="sub">Live numbers for this running session</div>
+        </div>
+        <div class="stats-grid">
+          <div class="stat-c">
+            <div class="stat-l">Files Downloaded</div>
+            <div class="stat-v a" id="st-files">0</div>
+            <div class="stat-mini-bar"><div class="stat-mini-fill" id="smf-files" style="width:0%"></div></div>
+          </div>
+          <div class="stat-c">
+            <div class="stat-l">Total Size</div>
+            <div class="stat-v" id="st-size">0 MB</div>
+            <div class="stat-mini-bar"><div class="stat-mini-fill" id="smf-size" style="width:0%;background:linear-gradient(90deg,var(--acc3),var(--grn))"></div></div>
+          </div>
+          <div class="stat-c">
+            <div class="stat-l">Avg Speed</div>
+            <div class="stat-v g" id="st-spd">—</div>
+            <div class="stat-mini-bar"><div class="stat-mini-fill" id="smf-spd" style="width:0%;background:linear-gradient(90deg,var(--grn),var(--yel))"></div></div>
+          </div>
+          <div class="stat-c">
+            <div class="stat-l">Session Time</div>
+            <div class="stat-v" id="st-time">0m 00s</div>
+          </div>
+        </div>
+        <div class="stats-breakdown">
+          <div class="stats-breakdown-hdr">Loaded media breakdown (current chat)</div>
+          <div class="sb-row"><span class="sb-label">🎬 Video</span><div class="prog-track"><div class="prog-fill" id="sb-video" style="width:0%"></div></div><span class="sb-count" id="sb-video-n">0</span></div>
+          <div class="sb-row"><span class="sb-label">🖼 Photo</span><div class="prog-track"><div class="prog-fill" id="sb-photo" style="width:0%"></div></div><span class="sb-count" id="sb-photo-n">0</span></div>
+          <div class="sb-row"><span class="sb-label">🎵 Audio</span><div class="prog-track"><div class="prog-fill" id="sb-audio" style="width:0%"></div></div><span class="sb-count" id="sb-audio-n">0</span></div>
+          <div class="sb-row"><span class="sb-label">📄 Doc</span><div class="prog-track"><div class="prog-fill" id="sb-document" style="width:0%"></div></div><span class="sb-count" id="sb-document-n">0</span></div>
+          <div class="sb-row"><span class="sb-label">★ Favorites</span><div class="prog-track"><div class="prog-fill" id="sb-favorite" style="width:0%;background:linear-gradient(90deg,#fbbf24,#f59e0b)"></div></div><span class="sb-count" id="sb-favorite-n">0</span></div>
+        </div>
+        <div class="stats-speed-panel">
+          <div class="stats-breakdown-hdr">Download speed</div>
+          <canvas id="mini-speed-chart" width="640" height="90"></canvas>
         </div>
       </div>
     </div>
@@ -2174,14 +2250,14 @@ const S = {
   sidebarTab:'all', currentChat:null, media:[], selected:new Set(),
   filter:'all', sortBy:'date-desc', minId:0, loading:false,
   dlActive:false, curDlId:null, activeDl:new Map(), paused:false,
-  queueRemaining:0, completedLog:[], gpuChecked:false, upscaleMode:new Map(),
+  queueRemaining:0, completedLog:[], gpuChecked:false, upscaleMode:new Map(), lastHasMore:false,
   statsVisible:false, sidebarOpen:true,
   theme:_ls('apex-theme','dark'),
   viewMode:_ls('apex-view','grid'),
   preset:'Turbo', speedHist:new Array(30).fill(0),
   ctxItem:null, previewItem:null,
   notifs:[], unreadNotifs:0,
-  typeCounts:{all:0,video:0,photo:0,audio:0,document:0},
+  typeCounts:{all:0,video:0,photo:0,audio:0,document:0,favorite:0},
   sessionMaxSpd:0, sessionMaxFiles:0,
 };
 
@@ -2194,6 +2270,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   startSSE();
   loadCfg();
   checkForUpdate();
+  moveTabIndicator('media');
   setTimeout(function(){ if(!S.connected) showSettings(); },2000);
   setInterval(refreshStats, 2500);
   document.addEventListener('click', e=>{
@@ -2431,9 +2508,7 @@ function startSSE(){
     addNotif('📥','New media',(d.chat_name||'')+': '+(d.orig_name||d.type));
     if(S.currentChat && S.currentChat.id==d.chat_id){
       S.media.unshift(d);
-      S.typeCounts.all++;
-      if(S.typeCounts[d.type]!==undefined) S.typeCounts[d.type]++;
-      updateCounts();
+      recomputeCounts();
       const grid=document.getElementById('media-grid');
       if(grid) grid.prepend(makeCard(d));
     }
@@ -2630,7 +2705,7 @@ async function openChat(chatId,chatName){
   if(S.loading) return;
   S.currentChat={id:chatId,name:chatName};
   S.media=[]; S.selected.clear(); S.minId=0;
-  S.typeCounts={all:0,video:0,photo:0,audio:0,document:0};
+  S.typeCounts={all:0,video:0,photo:0,audio:0,document:0,favorite:0};
   const grid=document.getElementById('media-grid');
   grid.innerHTML='';
   document.getElementById('empty-state').style.display='none';
@@ -2678,17 +2753,14 @@ async function loadMedia(forceRefresh){
   const ids=data.items.map(i=>i.id);
   S.minId=Math.max(0,Math.min(...ids)-1);
   S.media.push(...fresh);
-  fresh.forEach(i=>{
-    S.typeCounts.all++;
-    if(S.typeCounts[i.type]!==undefined) S.typeCounts[i.type]++;
-  });
-  updateCounts();
+  recomputeCounts();
   renderCards(fresh,grid);
   setBotStatus(`${S.media.length} items loaded from ${S.currentChat.name}`);
   document.getElementById('bot-count').textContent=S.media.length+' items';
   const lmWrap=document.getElementById('load-more-wrap');
   const lmBtn=document.getElementById('load-more-btn');
   const hasMore=data.items.length>=50;
+  S.lastHasMore=hasMore;
   lmWrap.style.display=hasMore?'flex':'none';
   if(lmBtn && hasMore) lmBtn.textContent=`↻ Load More (${S.media.length} loaded)`;
 }
@@ -2706,7 +2778,7 @@ function renderCards(items,grid){
 function makeCard(item){
   const d=document.createElement('div');
   d.className='media-card'+(item.done?' done':'');
-  d.dataset.id=item.id; d.dataset.type=item.type;
+  d.dataset.id=item.id; d.dataset.type=item.type; d.dataset.fav=item.favorite?'1':'0';
   const icons={video:'🎬',photo:'🖼️',audio:'🎵',document:'📄'};
   const labels={video:'VIDEO',photo:'PHOTO',audio:'AUDIO',document:'DOC'};
   const name=item.orig_name||`${item.type}_${item.id}`;
@@ -2717,6 +2789,7 @@ function makeCard(item){
       <div class="card-placeholder">${icons[item.type]||'📁'}</div>
       <div class="card-hover-overlay"><div class="card-hover-name">${esc(name)}</div></div>
       <div class="card-badge badge-${item.type}">${labels[item.type]||item.type}</div>
+      <button class="card-star${item.favorite?' on':''}" onclick="event.stopPropagation();toggleFavorite(${item.id},this)" title="Favorite">★</button>
       <div class="card-sel" id="sel-${item.id}">✓</div>
     </div>
     <div class="card-rim"></div>
@@ -2799,7 +2872,7 @@ async function refreshMedia(){
   const btn=document.getElementById('refresh-media-btn');
   if(btn){ btn.disabled=true; btn.textContent='⏳ Refreshing…'; }
   S.media=[]; S.minId=0; S.selected.clear();
-  S.typeCounts={all:0,video:0,photo:0,audio:0,document:0};
+  S.typeCounts={all:0,video:0,photo:0,audio:0,document:0,favorite:0};
   document.getElementById('media-grid').innerHTML='';
   document.getElementById('empty-state').style.display='none';
   await loadMedia(true);
@@ -2821,14 +2894,39 @@ function setFilter(btn){
 }
 function applyFilter(){
   document.querySelectorAll('.media-card').forEach(c=>{
-    c.style.display=(S.filter==='all'||c.dataset.type===S.filter)?'':'none';
+    let show;
+    if(S.filter==='all') show=true;
+    else if(S.filter==='favorite') show=c.dataset.fav==='1';
+    else show=c.dataset.type===S.filter;
+    c.style.display=show?'':'none';
   });
   const any=document.querySelector('.media-card:not([style*="display: none"])');
   const es=document.getElementById('empty-state');
   if(!any&&S.media.length){
     es.style.display='flex';
-    es.innerHTML='<div class="empty-icon">🔍</div><div class="empty-title">No '+S.filter+'s found</div><div class="empty-sub">This chat has no '+S.filter+' files</div>';
+    const label=S.filter==='favorite'?'favorited items':S.filter+'s';
+    es.innerHTML='<div class="empty-icon">'+(S.filter==='favorite'?'★':'🔍')+'</div><div class="empty-title">No '+label+' found</div><div class="empty-sub">'+(S.filter==='favorite'?'Star media to save it here':'This chat has no '+S.filter+' files')+'</div>';
   } else if(any) es.style.display='none';
+}
+async function toggleFavorite(id,btn){
+  const r=await fetch('/api/favorite',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({id})});
+  const d=await r.json().catch(()=>({ok:false}));
+  if(!d.ok){ toast('Could not update favorite','e'); return; }
+  btn.classList.toggle('on',d.favorite);
+  const card=btn.closest('.media-card');
+  if(card) card.dataset.fav=d.favorite?'1':'0';
+  const item=S.media.find(m=>m.id===id);
+  if(item) item.favorite=d.favorite;
+  recomputeCounts();
+  if(S.filter==='favorite') applyFilter();
+}
+function recomputeCounts(){
+  const c={all:0,video:0,photo:0,audio:0,document:0,favorite:0};
+  S.media.forEach(i=>{
+    c.all++; if(c[i.type]!==undefined) c[i.type]++; if(i.favorite) c.favorite++;
+  });
+  S.typeCounts=c; updateCounts();
 }
 function updateCounts(){
   Object.entries(S.typeCounts).forEach(([t,n])=>{
@@ -2972,22 +3070,47 @@ function escHtml(s){
 }
 
 /* ===================== DOWNLOADS TAB ===================== */
-function toggleDownloadsView(){
-  const dv=document.getElementById('downloads-view');
-  const open = dv.style.display==='none' || !dv.style.display;
-  dv.style.display = open ? 'flex' : 'none';
-  document.getElementById('media-grid').style.display = open ? 'none' : '';
+function switchTab(name){
+  if(name==='settings'){ showSettings(); return; } // modal, not a persistent view - don't change active tab
+
+  const grid=document.getElementById('media-grid');
+  const empty=document.getElementById('empty-state');
   const lm=document.getElementById('load-more-wrap');
-  if(open){
-    document.getElementById('empty-state').style.display='none';
-    lm.style.display='none';
+  const dv=document.getElementById('downloads-view');
+  const sb=document.getElementById('stats-bar');
+  const toolbar=document.getElementById('toolbar');
+
+  grid.style.display='none'; lm.style.display='none'; dv.style.display='none'; sb.style.display='none'; empty.style.display='none';
+  toolbar.style.display = (name==='media') ? '' : 'none';
+
+  document.querySelectorAll('.main-tab').forEach(t=>t.classList.toggle('active', t.dataset.tab===name));
+  moveTabIndicator(name);
+
+  if(name==='media'){
+    grid.style.display='';
+    if(!S.currentChat) empty.style.display='flex';
+    else { lm.style.display=S.lastHasMore?'flex':'none'; applyFilter(); }
+  } else if(name==='downloads'){
+    dv.style.display='flex';
     renderDownloadsView();
     checkGpuStatus();
-  } else {
-    if(!S.currentChat) document.getElementById('empty-state').style.display='flex';
+  } else if(name==='stats'){
+    sb.style.display='flex';
+    S.statsVisible=true;
+    refreshStats();
   }
-  document.getElementById('downloads-nav-btn').classList.toggle('active-nav',open);
 }
+function moveTabIndicator(name){
+  const btn=document.querySelector('.main-tab[data-tab="'+name+'"]');
+  const ind=document.getElementById('main-tab-indicator');
+  if(!btn||!ind) return;
+  ind.style.left=btn.offsetLeft+'px';
+  ind.style.width=btn.offsetWidth+'px';
+}
+window.addEventListener('resize',()=>{
+  const active=document.querySelector('.main-tab.active');
+  if(active) moveTabIndicator(active.dataset.tab);
+});
 async function checkGpuStatus(){
   if(S.gpuChecked) return;
   S.gpuChecked=true;
@@ -3201,7 +3324,19 @@ async function refreshStats(){
     const ms=document.getElementById('smf-spd');
     if(ms) ms.style.width=Math.min((d.avg_spd/Math.max(S.sessionMaxSpd,1))*100,100)+'%';
     drawSpeedGraph();
+    renderStatsBreakdown();
   }catch(e){}
+}
+function renderStatsBreakdown(){
+  const tc=S.typeCounts||{};
+  const total=Math.max(tc.all||0,1);
+  ['video','photo','audio','document','favorite'].forEach(t=>{
+    const n=tc[t]||0;
+    const bar=document.getElementById('sb-'+t);
+    const cnt=document.getElementById('sb-'+t+'-n');
+    if(bar) bar.style.width=Math.min((n/total)*100,100)+'%';
+    if(cnt) cnt.textContent=n;
+  });
 }
 async function checkForUpdate(){
   try{
@@ -3228,12 +3363,6 @@ function animateNumber(id,target){
     if(t<1) requestAnimationFrame(tick);
     else el.textContent=target;
   })(start);
-}
-function toggleStats(){
-  S.statsVisible=!S.statsVisible;
-  const bar=document.getElementById('stats-bar');
-  bar.classList.toggle('visible',S.statsVisible);
-  if(S.statsVisible) refreshStats();
 }
 
 /* ===================== SIDEBAR TOGGLE ===================== */
@@ -3339,13 +3468,23 @@ async function saveSettings(){
 function searchMedia(){
   var q=document.getElementById('media-search-inp');
   if(!q) return;
-  var qv=q.value.toLowerCase();
-  if(!qv||!S.currentChat){renderMedia(S.media);return;}
-  var filtered=S.media.filter(function(i){
-    return (i.orig_name||'').toLowerCase().includes(qv)||(i.type||'').toLowerCase().includes(qv);
+  var qv=q.value.toLowerCase().trim();
+  const grid=document.getElementById('media-grid');
+  if(!qv||!S.currentChat){
+    document.querySelectorAll('.media-card').forEach(c=>{ c.style.display=''; });
+    applyFilter();
+    setBotStatus(S.media.length+' items loaded'+(S.currentChat?' from '+S.currentChat.name:''));
+    return;
+  }
+  let matches=0;
+  document.querySelectorAll('.media-card').forEach(c=>{
+    const item=S.media.find(m=>String(m.id)===c.dataset.id);
+    const name=(item&&item.orig_name||'').toLowerCase();
+    const hit=name.includes(qv)||(item&&item.type||'').toLowerCase().includes(qv);
+    c.style.display=hit?'':'none';
+    if(hit) matches++;
   });
-  renderMedia(filtered);
-  setBotStatus(filtered.length+' results for "'+qv+'"');
+  setBotStatus(matches+' results for "'+qv+'"');
 }
 function reconnect(){
   setConn('connecting','Reconnecting...');

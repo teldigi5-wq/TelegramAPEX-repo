@@ -39,6 +39,9 @@ electron/release/
 electron/backend/
 electron/dist/
 
+# ── Optional AI Upscale binary (user-downloaded, not bundled) ────────────────
+tools/realesrgan/
+
 # ── OS / editor cruft ─────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
