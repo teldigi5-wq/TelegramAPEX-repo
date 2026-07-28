@@ -152,6 +152,7 @@ def _sj(path, data):
 _dl_db: set = set(_lj(DL_DB_FILE, []))
 def is_done(i):   return str(i) in _dl_db
 def mark_done(i): _dl_db.add(str(i)); _sj(DL_DB_FILE, list(_dl_db))
+def unmark_done(i): _dl_db.discard(str(i)); _sj(DL_DB_FILE, list(_dl_db))
 
 FAV_DB_FILE = os.path.join(_DIR, "favorites_v10.json")
 _fav_db: set = set(_lj(FAV_DB_FILE, []))
@@ -1124,6 +1125,54 @@ def api_favorite():
     on=toggle_fav(item_id)
     return jsonify({"ok":True,"favorite":on})
 
+@app.route("/api/verify_downloads", methods=["POST"])
+def api_verify_downloads():
+    if not ffmpeg_available() or not shutil.which("ffprobe"):
+        return jsonify({"ok":False,"error":"ffmpeg/ffprobe not installed or not in PATH"}),400
+    if not DOWNLOAD_FOLDER or not os.path.isdir(DOWNLOAD_FOLDER):
+        return jsonify({"ok":False,"error":"Download folder not found"}),400
+
+    # Build a reverse filename->id index from everything seen this session,
+    # so corrupted files can have their done-status cleared for redownload.
+    name_to_id={}
+    for items in state.media_cache.values():
+        for it in items:
+            if it.get("orig_name"): name_to_id[it["orig_name"]]=it["id"]
+    for row in state.download_log:
+        if row.get("path"): name_to_id[os.path.basename(row["path"])]=row["id"]
+
+    video_ext=(".mp4",".mkv",".mov",".avi",".webm",".m4v",".flv",".wmv")
+    audio_ext=(".mp3",".m4a",".ogg",".opus",".flac",".wav")
+    targets=[]
+    for root,_,files in os.walk(DOWNLOAD_FOLDER):
+        for fn in files:
+            if fn.lower().endswith(video_ext+audio_ext):
+                targets.append(os.path.join(root,fn))
+
+    corrupt=[]; cleared=[]; unmatched=[]
+    for path in targets:
+        if _verify_media_integrity(path): continue
+        fn=os.path.basename(path)
+        corrupt.append(fn)
+        match_id=name_to_id.get(fn)
+        if match_id is None:
+            # try stripping a "_<id>" disambiguation suffix APEX adds on name collisions
+            b,e=os.path.splitext(fn)
+            if "_" in b and b.rsplit("_",1)[1].isdigit():
+                match_id=int(b.rsplit("_",1)[1])
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        if match_id is not None:
+            unmark_done(match_id)
+            cleared.append(fn)
+        else:
+            unmatched.append(fn)
+
+    return jsonify({"ok":True,"scanned":len(targets),"corrupt":corrupt,
+                     "cleared":cleared,"unmatched":unmatched})
+
 @app.route("/api/clear_history", methods=["POST"])
 def api_clear_history():
     global _dl_db
@@ -2080,6 +2129,13 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-sy
           </div>
           <div class="dlv-note">"Upscale to 4K" resizes video to 3840×2160 using FFmpeg (Lanczos interpolation) - it sharpens and smooths, but it doesn't invent detail the source doesn't have. Requires <a href="https://ffmpeg.org/download.html" target="_blank" rel="noopener">ffmpeg</a> installed and on your system PATH. <span id="gpu-status-note">Checking for GPU acceleration…</span></div>
           <div id="dlv-completed-list" class="dlv-list"><div class="dlv-empty">No completed downloads yet this session</div></div>
+        </div>
+        <div class="dlv-section">
+          <div class="dlv-section-title">🩺 Verify Downloads
+            <button class="tb-btn" id="verify-dl-btn" style="margin-left:auto" onclick="verifyDownloads()">🔍 Scan for corrupted files</button>
+          </div>
+          <div class="dlv-note">Checks every downloaded video/audio file with ffprobe and finds any that are corrupted (e.g. from before this fix was installed). Corrupted files found this way are deleted and cleared from history so they'll show up to redownload again. Requires ffmpeg/ffprobe.</div>
+          <div id="verify-dl-results"></div>
         </div>
       </div>
       <div id="stats-bar" style="display:none">
@@ -3564,6 +3620,41 @@ async function clearHistory(){
   });
 }
 function exportHistory(){ window.location.href='/api/export_history'; }
+async function verifyDownloads(){
+  const btn=document.getElementById('verify-dl-btn');
+  const out=document.getElementById('verify-dl-results');
+  if(btn){ btn.disabled=true; btn.textContent='⏳ Scanning… this can take a while'; }
+  out.innerHTML='';
+  try{
+    const r=await fetch('/api/verify_downloads',{method:'POST'});
+    const d=await r.json();
+    if(!d.ok){
+      toast('Verify failed: '+(d.error||'unknown error'),'e',8000);
+      out.innerHTML=`<div class="dlv-empty">${esc(d.error||'Scan failed')}</div>`;
+      return;
+    }
+    if(d.corrupt.length===0){
+      toast('✅ Scanned '+d.scanned+' files — all good, no corruption found','s',7000);
+      out.innerHTML=`<div class="dlv-empty">✅ Scanned ${d.scanned} files — none corrupted</div>`;
+      return;
+    }
+    toast(`⚠️ Found ${d.corrupt.length} corrupted file(s) out of ${d.scanned} scanned`,'w',9000);
+    let html=`<div class="dlv-row" style="flex-direction:column;align-items:stretch;gap:6px">
+      <div style="font-weight:800;color:var(--tx1)">Scanned ${d.scanned} files — found ${d.corrupt.length} corrupted:</div>`;
+    d.cleared.forEach(fn=>{
+      html+=`<div style="font-size:12px;color:var(--tx2)">🗑 ${esc(fn)} — deleted, cleared for redownload</div>`;
+    });
+    d.unmatched.forEach(fn=>{
+      html+=`<div style="font-size:12px;color:var(--yel)">🗑 ${esc(fn)} — deleted, but couldn't auto-match to redownload (browse to its chat, then use the DL button)</div>`;
+    });
+    html+='</div>';
+    out.innerHTML=html;
+  }catch(e){
+    toast('Verify failed: '+e.message,'e',8000);
+  }finally{
+    if(btn){ btn.disabled=false; btn.textContent='🔍 Scan for corrupted files'; }
+  }
+}
 
 /* ===================== UTILS ===================== */
 function openFolder(){ fetch('/api/open_folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}); }
