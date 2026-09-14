@@ -1,0 +1,43 @@
+name: Bug report
+description: Report a reproducible problem in Telegram APEX
+title: "[Bug]: "
+labels: []
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe what happened and what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest reliable reproduction steps.
+      placeholder: |
+        1. Start...
+        2. Open...
+        3. Download...
+        4. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Windows version, Python/Electron build, app version, and relevant tooling such as FFmpeg.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs or evidence
+      description: Add sanitized logs or screenshots. Never include API credentials, session files, tokens, or private media.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, session data, tokens, and private content from this report.
+          required: true
