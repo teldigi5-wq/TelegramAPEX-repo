@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-apex-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Check Python syntax
+        run: python -m py_compile TelegramAPEX_v9.py
+
+      - name: Check Electron JavaScript syntax
+        run: |
+          node --check electron/main.js
+          node --check electron/preload.js
+
+      - name: Validate JSON configuration
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+
+          for path in (Path('config_v10.example.json'), Path('electron/package.json')):
+              json.loads(path.read_text(encoding='utf-8'))
+              print(f'{path} is valid JSON')
