@@ -100,21 +100,29 @@ async function createWindow() {
     return;
   }
 
-  win = new BrowserWindow({
+  const iconPath = path.join(__dirname, 'build', 'icon.png');
+  const windowOptions = {
     width: 1580,
     height: 970,
     minWidth: 1000,
     minHeight: 640,
     backgroundColor: '#0b0f14',
     title: 'Telegram APEX',
-    icon: path.join(__dirname, 'build', 'icon.png'),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
       preload: path.join(__dirname, 'preload.js'),
     },
-  });
+  };
+
+  // Use a custom icon when one is present, but do not fail on clean clones or
+  // packaging builds that intentionally rely on Electron's default icon.
+  if (fs.existsSync(iconPath)) {
+    windowOptions.icon = iconPath;
+  }
+
+  win = new BrowserWindow(windowOptions);
 
   Menu.setApplicationMenu(null);
   win.loadURL(`http://127.0.0.1:${backendPort}/`);
