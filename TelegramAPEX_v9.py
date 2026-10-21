@@ -44,6 +44,7 @@ from collections import deque, OrderedDict
 from flask import Flask, jsonify, request, Response, send_file, stream_with_context
 from desktop_origin_policy import permitted_desktop_request
 from desktop_media_policy import parse_media_page
+from desktop_media_paths import contained_media_path, is_in_download_tree
 try:
     import webview
     WEBVIEW_OK = True
@@ -610,7 +611,7 @@ class Backend:
             ext={"video":".mp4","photo":".jpg","document":".bin"}.get(mtype,self._audio_ext(msg))
             if mtype=="audio": ext=self._audio_ext(msg)
             name=f"{mtype}_{msg.id}_{ts}{ext}"
-        path=os.path.join(DOWNLOAD_FOLDER,sub,name)
+        path=contained_media_path(DOWNLOAD_FOLDER,sub,name)
         if os.path.exists(path) and os.path.getsize(path)>0:
             base,ext2=os.path.splitext(path); path=f"{base}_{msg.id}{ext2}"
         acquired=False
@@ -862,16 +863,22 @@ def _locate_downloaded_path(msg_id):
     session's download log or by reconstructing the expected path from any
     cached media item (covers files downloaded in a previous session)."""
     log_entry = next((r for r in state.download_log if r["id"]==msg_id), None)
-    if log_entry and log_entry.get("path") and os.path.exists(log_entry["path"]):
+    if (log_entry and log_entry.get("path") and
+            is_in_download_tree(DOWNLOAD_FOLDER, log_entry["path"]) and
+            os.path.isfile(log_entry["path"])):
         return log_entry["path"]
     for items in state.media_cache.values():
         for it in items:
             if it.get("id")==msg_id and it.get("orig_name"):
                 sub={"video":"videos","photo":"photos","audio":"audios","document":"docs"}.get(it.get("type"),"docs")
-                base_path=os.path.join(DOWNLOAD_FOLDER,sub,it["orig_name"])
+                try:
+                    base_path=contained_media_path(DOWNLOAD_FOLDER,sub,it["orig_name"])
+                except ValueError:
+                    continue
                 b,e=os.path.splitext(base_path)
                 for cand in (base_path, f"{b}_{msg_id}{e}"):
-                    if os.path.exists(cand) and os.path.getsize(cand)>0:
+                    if (is_in_download_tree(DOWNLOAD_FOLDER, cand) and
+                            os.path.isfile(cand) and os.path.getsize(cand)>0):
                         return cand
     return None
 
@@ -920,14 +927,20 @@ def api_stream(item_id):
     # 1) Prefer an already-downloaded file on disk - fast path, full native seeking.
     local_path=None
     log_entry=next((r for r in state.download_log if r["id"]==item_id), None)
-    if log_entry and log_entry.get("path") and os.path.exists(log_entry["path"]):
+    if (log_entry and log_entry.get("path") and
+            is_in_download_tree(DOWNLOAD_FOLDER, log_entry["path"]) and
+            os.path.isfile(log_entry["path"])):
         local_path=log_entry["path"]
     elif orig_name:
         sub={"video":"videos","photo":"photos","audio":"audios","document":"docs"}.get(mtype,"docs")
-        base_path=os.path.join(DOWNLOAD_FOLDER,sub,orig_name)
+        try:
+            base_path=contained_media_path(DOWNLOAD_FOLDER,sub,orig_name)
+        except ValueError:
+            return jsonify({"error":"Invalid media file name"}),400
         b,e=os.path.splitext(base_path)
         for cand in (base_path, f"{b}_{item_id}{e}"):
-            if os.path.exists(cand) and os.path.getsize(cand)>0:
+            if (is_in_download_tree(DOWNLOAD_FOLDER, cand) and
+                    os.path.isfile(cand) and os.path.getsize(cand)>0):
                 local_path=cand; break
     if local_path:
         mime=mimetypes.guess_type(local_path)[0] or "application/octet-stream"
