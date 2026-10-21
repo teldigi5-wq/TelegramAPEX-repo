@@ -126,11 +126,16 @@ async function createWindow() {
 
   Menu.setApplicationMenu(null);
   win.loadURL(`http://127.0.0.1:${backendPort}/`);
+  // Remote pages cannot replace the privileged desktop app frame.
+  const { safeWebLink, appBackendNavigation } = require('./navigation-policy');
+  win.webContents.on('will-navigate', (event, url) => {
+    if (!appBackendNavigation(url, backendPort)) event.preventDefault();
+  });
 
   // Open any target="_blank" links (e.g. GitHub release links) in the
   // system browser instead of a new Electron window.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    if (safeWebLink(url)) shell.openExternal(url).catch(() => {});
     return { action: 'deny' };
   });
 
