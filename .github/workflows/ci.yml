@@ -39,6 +39,8 @@ jobs:
         run: |
           node --check electron/main.js
           node --check electron/preload.js
+          node --check electron/navigation-policy.js
+          node --test electron/navigation-policy.test.js
 
       - name: Validate JSON configuration
         shell: python
