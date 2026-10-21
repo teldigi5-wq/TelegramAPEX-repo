@@ -43,6 +43,7 @@ from collections import deque, OrderedDict
 
 from flask import Flask, jsonify, request, Response, send_file, stream_with_context
 from desktop_origin_policy import permitted_desktop_request
+from desktop_media_policy import parse_media_page
 try:
     import webview
     WEBVIEW_OK = True
@@ -827,8 +828,12 @@ def api_media(chat_id):
     try: chat_id = int(chat_id)
     except ValueError: return jsonify({"error":"invalid chat_id"}),400
     if not state.connected: return jsonify({"error":"not connected"}),400
-    limit     = int(request.args.get("limit",50))
-    before_id = int(request.args.get("before_id", request.args.get("min_id",0)))
+    try:
+        limit, before_id = parse_media_page(
+            request.args.get("limit", "50"),
+            request.args.get("before_id", request.args.get("min_id", "0")))
+    except ValueError:
+        return jsonify({"error": "Invalid media pagination parameters"}), 400
     refresh   = request.args.get("refresh")=="1"
     if refresh:
         state.media_cache[chat_id]=[]
