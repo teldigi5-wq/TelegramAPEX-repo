@@ -44,7 +44,7 @@ jobs:
 
       - name: Test private loopback browser-origin policy
         run: |
-          python -m py_compile desktop_origin_policy.py desktop_media_policy.py TelegramAPEX_v9.py
+          python -m py_compile desktop_origin_policy.py desktop_media_policy.py desktop_media_paths.py TelegramAPEX_v9.py
           python -m unittest discover -s tests -p 'test_*.py' -v
 
       - name: Validate JSON configuration
