@@ -692,7 +692,8 @@ def add_no_cache(response):
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
     return response
-app.secret_key = hashlib.md5(b"apex_v10_secret").hexdigest()
+# Generate an unpredictable local Flask signing key instead of a public constant.
+app.secret_key = os.urandom(32)
 
 def fmt_sz(mb):
     if mb>=1024: return f"{mb/1024:.2f} GB"
