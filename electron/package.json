@@ -23,17 +23,27 @@
     },
     "files": [
       "main.js",
-      "preload.js"
+      "preload.js",
+      "navigation-policy.js"
     ],
     "extraResources": [
       {
         "from": "backend",
         "to": "backend",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {
-      "target": [{ "target": "nsis", "arch": ["x64"] }]
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
     },
     "nsis": {
       "oneClick": false,
