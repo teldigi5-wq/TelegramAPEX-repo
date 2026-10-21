@@ -42,6 +42,7 @@ from concurrent.futures import ThreadPoolExecutor
 from collections import deque, OrderedDict
 
 from flask import Flask, jsonify, request, Response, send_file, stream_with_context
+from desktop_origin_policy import permitted_desktop_request
 try:
     import webview
     WEBVIEW_OK = True
@@ -685,6 +686,17 @@ state = AppState()
 
 # -- Flask App -----------------------------------------------------------------
 app = Flask(__name__, static_folder=None)
+# Reject DNS-rebinding Host headers and cross-site requests to local private APIs.
+# This protects the browser-origin boundary, not other processes on the host.
+@app.before_request
+def enforce_local_browser_origin():
+    if not permitted_desktop_request(
+        request.host,
+        request.headers.get("Origin"),
+        request.headers.get("Sec-Fetch-Site"),
+    ):
+        return jsonify({"error": "Cross-origin desktop API request blocked"}), 403
+
 
 @app.after_request
 def add_no_cache(response):

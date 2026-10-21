@@ -42,6 +42,11 @@ jobs:
           node --check electron/navigation-policy.js
           node --test electron/navigation-policy.test.js
 
+      - name: Test private loopback browser-origin policy
+        run: |
+          python -m py_compile desktop_origin_policy.py TelegramAPEX_v9.py
+          python -m unittest discover -s tests -p 'test_*.py' -v
+
       - name: Validate JSON configuration
         shell: python
         run: |
