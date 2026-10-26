@@ -64,21 +64,6 @@ jobs:
               json.loads(path.read_text(encoding='utf-8'))
               print(f'{path} is valid JSON')
 
-      - name: Generate verifiable remediation lockfile for review
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd electron
-          npm install electron-builder@26.18.0 --save-dev --package-lock-only --ignore-scripts --no-audit --no-fund
-          node - <<'NODE'
-          const fs=require('node:fs');
-          const b64=fs.readFileSync('package-lock.json').toString('base64');
-          const lock=JSON.parse(fs.readFileSync('package-lock.json','utf8'));
-          console.log('REMEDIATION_VERSIONS='+JSON.stringify(Object.fromEntries(['body-parser','axios','follow-redirects','sharp','proxy-addr','qs','electron','electron-builder','vite','tar'].map(n=>[n,lock.packages['node_modules/'+n]?.version||null]))));
-          for(let i=0;i<b64.length;i+=8000) console.log('REMEDIATION_LOCK_CHUNK_'+String(i/8000).padStart(4,'0')+'='+b64.slice(i,i+8000));
-          console.log('REMEDIATION_LOCK_END='+Math.ceil(b64.length/8000));
-          NODE
-
       - name: Audit Electron dependency graph (high severity)
         working-directory: electron
         run: npm audit --audit-level=high
