@@ -7,10 +7,10 @@ const manifest = require('./package.json');
 
 test('Electron is pinned to a release with the compromised intermediate certificate block', () => {
   assert.equal(manifest.devDependencies.electron, '44.9.1');
-  assert.equal(lock.packages['node_modules/electron-builder'].version, '26.18.0');
   const lockPath = path.join(__dirname, 'package-lock.json');
   assert.ok(fs.existsSync(lockPath), 'reproducible Electron lockfile must be committed');
   const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+  assert.equal(lock.packages['node_modules/electron-builder'].version, '26.18.0');
   assert.equal(lock.packages['node_modules/electron'].version, '44.9.1');
   assert.equal(lock.packages[''].devDependencies.electron, '44.9.1');
 });
