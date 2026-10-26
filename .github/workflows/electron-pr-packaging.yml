@@ -105,13 +105,16 @@ jobs:
           if (-not $exe) { throw 'Electron installer was not created' }
           $hash = (Get-FileHash -Algorithm SHA256 -Path $exe.FullName).Hash
           Write-Host "PR installer SHA256: $hash"
+          "$($hash.ToLowerInvariant())  $($exe.Name)" | Set-Content -Path electron/release/SHA256SUMS.txt -Encoding ascii
           echo "name=$($exe.Name)" >> $env:GITHUB_OUTPUT
 
       - name: Upload artifact (every run)
         uses: actions/upload-artifact@v4
         with:
           name: TelegramAPEX-PR-Windows-Installer
-          path: ${{ steps.find_installer.outputs.path }}
+          path: |
+            ${{ steps.find_installer.outputs.path }}
+            electron/release/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 7
 
