@@ -1,154 +1,146 @@
-# Telegram APEX v10 ULTRA
+<div align="center">
 
-A local, self-hosted media browser & bulk downloader for **your own Telegram account**.
-It runs a small web UI on your machine (via Flask + Telethon) so you can browse your chats,
-preview media, and download photos/videos/audio/documents in parallel — fast.
+# Telegram APEX
 
-> Runs against the **official Telegram API** using your own API credentials and your own
-> logged-in session. This is a personal tool for backing up / bulk-downloading media from
-> chats you're already a member of — not a scraper for other people's private data.
+**Local-first Telegram media manager · Python / Telethon / Flask · Electron desktop shell**
 
-## ✨ Features
+[![CI](https://github.com/teldigi5-wq/TelegramAPEX-repo/actions/workflows/ci.yml/badge.svg)](https://github.com/teldigi5-wq/TelegramAPEX-repo/actions/workflows/ci.yml)
+[Source](https://github.com/teldigi5-wq/TelegramAPEX-repo) · [Security policy](SECURITY.md) · [Windows packaging](.github/workflows/electron-pr-packaging.yml) · [Release evidence](docs/SECURITY_RELEASE_EVIDENCE.md)
 
-- Browse all your Telegram chats/channels and their media in a fast local web UI
-- **Downloads tab** — a dedicated view showing active downloads (live progress), how many are queued, and a session history of completed downloads, separate from the media browser
-- **Proper tab navigation** — Media / Downloads / Stats / Settings, replacing the old icon-toggle buttons
-- **★ Favorites** — star any media item to save it, with a dedicated Favorites filter; persists across restarts
-- **Stats tab** — session totals, a live speed graph, and a media-type breakdown, in a full dashboard view
-- Media search box now actually works (was silently broken - called a function that didn't exist)
-- **Concurrent downloads** — several files at once (configurable), not one-at-a-time
-- Adaptive chunked + parallel-segment downloading for large files, chunk size scales up to 8MB on sustained fast links
-- **"5G Ultra" preset** — 8 connections / 8 concurrent files, tuned for high-bandwidth mobile or fiber connections (plus the original Turbo/Balanced/Safe presets)
-- Downloads are verified for completeness (size-checked) **and structural integrity** (ffprobe-checked, catches a same-size-but-corrupt file from a segment-boundary mismatch in parallel downloads) before being marked done, with automatic retry on failure
-- Thumbnails now generate locally via ffmpeg for already-downloaded videos whose Telegram-side thumbnail is missing, instead of showing nothing
-- **"Upscale to 4K"** on any completed video (Downloads tab) — resizes to 3840×2160 via FFmpeg/Lanczos, GPU-accelerated (NVENC/QuickSync/AMF) when available. This sharpens/smooths but does **not** add AI-generated detail; requires [ffmpeg](https://ffmpeg.org/download.html) installed and on your PATH
-- **"AI Upscale"** — a slower, heavier alternative that adds real detail via [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan) (GPU-accelerated, frame-by-frame). Optional manual setup — see below
-- Working video/audio preview — plays the actual file (streamed live from Telegram if not downloaded yet, with seek support) instead of failing silently
-- **🔄 Refresh button** on the media view to force a clean reload if a chat's media doesn't show up
-- **Load more** pagination fixed to correctly fetch older media instead of re-fetching the same page, with a loading state and running item count
-- Lazy-loaded thumbnails (only fetch thumbnails for cards actually scrolled into view) — noticeably faster on large chats
-- Thumbnails no longer fall back to downloading entire videos/documents just to generate a preview
-- Live per-file progress rows, aggregate speed graph, ETA
-- Pause / Resume the whole queue, cancel individual files or cancel all
-- Optional bandwidth cap (KB/s), fairly divided across concurrent downloads
-- **Auto-download new incoming media** as it arrives (opt-in)
-- Session download history → export to CSV
-- Checks GitHub Releases for newer versions on startup
-- Ships as a single portable `.exe`, **or** as a proper Windows desktop installer via Electron (see below) — no Python required on the machine you run it on either way
+**Maintained by [Poojana Kaveesh Sellahewa](https://github.com/teldigi5-wq).**
 
-## 🚀 Quick start (from source)
+</div>
 
-1. Install [Python 3.10+](https://python.org) (3.12 recommended).
-2. Get your API ID & Hash from <https://my.telegram.org/apps>.
-3. Copy `config_v10.example.json` → `config_v10.json` and fill in your `api_id` / `api_hash`
-   — **or** just leave it blank and enter them in the Settings dialog the first time you run it.
-4. Double-click `LAUNCH.bat` (Windows). It installs missing packages automatically and starts
-   the app, opening your browser to the local UI.
+## What is it?
 
-## 📦 Building the standalone EXE
+Telegram APEX is a **local** media-browsing and download application for content accessible through **your own authorized Telegram account**. Python's Telethon client talks to Telegram, Flask serves a loopback-only browser UI, and an optional Electron application launches the backend inside a Windows desktop shell.
 
-**Locally:** double-click `BUILD_EXE.bat`. It installs PyInstaller if needed and produces
-`TelegramAPEX_v10.exe` in this folder — no Python required to run that exe elsewhere.
+The design focuses on efficient media workflows while keeping Telegram credentials, sessions and downloaded content out of a hosted third-party backend.
 
-**Via GitHub (recommended):** this repo includes a GitHub Actions workflow
-(`.github/workflows/build.yml`) that builds the exe on a clean Windows runner and attaches it
-to a GitHub Release automatically. To use it:
+| Area | Code / technology |
+| --- | --- |
+| Telegram integration | Python 3.12 CI baseline, Telethon |
+| Local application API | Flask, strict loopback-host/origin checks |
+| Desktop shell | Electron 44 with sandboxed, context-isolated renderer |
+| Downloads | Local filesystem, queue/concurrency and media preview code |
+| Packaging | PyInstaller Python executable + electron-builder/NSIS Windows x64 installer |
+| Verification | Python unittest, Node security tests, dependency audits, Windows packaging CI |
 
-1. Push this repo to GitHub.
-2. Go to **Releases → Draft a new release**, tag it (e.g. `v10.1.0`), and publish it.
-3. Actions will build `TelegramAPEX_v10.exe` and attach it to the release within a few minutes.
-4. (Optional) Update the `GITHUB_REPO` constant near the top of `TelegramAPEX_v9.py` to
-   `"your-username/your-repo"` so the in-app update checker can find your releases.
+### Architecture
 
-You can also trigger a build manually any time from the **Actions** tab
-("Build Windows EXE" → *Run workflow*), without publishing a release.
+~~~mermaid
+flowchart LR
+    User[Authorized account holder] --> App[Local browser / Electron UI]
+    App --> Web[Flask HTTP on loopback]
+    Web --> Auth[Telethon authenticated session]
+    Auth --> TG[Telegram API]
+    Web --> Queue[Media queue / previews]
+    Queue --> Files[Local download directory]
+    Electron[Electron main process] --> Backend[Packaged Python backend]
+    Backend --> Web
+~~~
 
-## 🖥️ Building the Electron desktop app (no console window, proper installer)
+The Python service is intended to be accessed from the same machine, not exposed as a public website. Electron launches the backend and opens only its private loopback UI.
 
-The plain `.exe` above is a console app — a black terminal window sits behind the UI. The
-`electron/` folder wraps the same Python backend in a real desktop shell: no console window,
-a taskbar/Start Menu entry, a proper `Setup.exe` installer, and desktop/Start Menu shortcuts.
+## Product workflow
 
-**How it works:** Electron spawns the Python backend as a hidden background process
-(`windowsHide: true`, unbuffered stdout so it starts fast and reliably), waits for it to
-report ready, then opens a native window pointed at its local web UI. Closing the window
-stops the backend automatically.
+1. Supply personal Telegram API ID and hash from the official Telegram developer console and authorize **your own session**.
+2. Browse chats you can access; search, filter and paginate media using the local UI.
+3. Download authorized photos, videos and files; inspect progress, queued items and completed output.
+4. Optionally use FFmpeg for local thumbnails or rescaling, subject to installed binaries and hardware.
+5. Keep private session material and media on your own machine.
 
-**Build it locally — one command:**
-```
-BUILD_ELECTRON.bat
-```
-This builds the Python backend with PyInstaller, stages it into `electron/backend/`, then
-runs Electron Builder to produce `electron/release/Telegram APEX Setup <version>.exe` — a
-double-click installer for end users, with no Python and no visible console window.
+**Feature qualification:** The code contains queue, preview, concurrency, search and optional processing paths. CI does **not** demonstrate Telegram login, download success on a real account, peak speeds, structural integrity on arbitrary media, or universal format compatibility. Titles such as “5G Ultra” are UI presets, not benchmark results.
 
-**Build it via GitHub Actions:** the included `.github/workflows/build-electron.yml` does the
-same thing on a clean Windows runner and attaches the installer to your GitHub Release,
-alongside the plain exe. Trigger it the same way — publish a release, or run it manually from
-the Actions tab.
+### Video processing is not always AI
 
-**Developing/testing without building an installer:**
-```bash
+Ordinary FFmpeg/Lanczos “4K upscale” **resizes** a video; it does not invent high-frequency detail. A separate optional Real-ESRGAN integration depends on user-provided third-party binaries/models and GPU compatibility. Neither approach promises restoration quality or performance on every file.
+
+## Security and engineering decisions
+
+| Decision | Implementation | How to discuss it |
+| --- | --- | --- |
+| Allow only local desktop origins | [desktop_origin_policy.py](desktop_origin_policy.py), [tests](tests/test_desktop_origin_policy.py) | Localhost/port matching reduces cross-origin access to the backend |
+| Contain output within download folders | [desktop_media_paths.py](desktop_media_paths.py), [path tests](tests/test_media_path_policy.py) | Reject traversal and links escaping the chosen storage tree |
+| Separate privileged desktop operations | [electron/main.js](electron/main.js), [navigation policy](electron/navigation-policy.js) | Sandbox and context isolation; Electron page limited to loopback backend |
+| Avoid silent dependency drift | [requirements-electron-build.txt](requirements-electron-build.txt), [electron/package-lock.json](electron/package-lock.json) | Pin Python packaging dependencies and npm installation |
+| Verify packaging on a clean Windows runner | [PR Windows packaging](.github/workflows/electron-pr-packaging.yml) | Stage PyInstaller backend inside Electron and record installer SHA-256 |
+
+**Traceable security work:** [PR #5](https://github.com/teldigi5-wq/TelegramAPEX-repo/pull/5) upgraded Electron, added pinned dependency audits and successfully exercised an integrated Windows build. Passing these checks is **not** the same as independent penetration testing or a signed production installer.
+
+## Quick start from source
+
+**Requirements:** Windows for the included launch scripts, Python 3.12 recommended, a Telegram account you own and API credentials from [my.telegram.org/apps](https://my.telegram.org/apps). Additional packages are installed by the launch script.
+
+1. Copy **config_v10.example.json** to a local **config_v10.json**.
+2. Enter your own API credentials only in that local file or the application's settings flow.
+3. Run **LAUNCH.bat** from an authorized local Windows machine.
+
+~~~bat
+copy config_v10.example.json config_v10.json
+LAUNCH.bat
+~~~
+
+Do not place session data or real API credentials in a public bug report, screen recording or committed file. Do not expose the Flask HTTP port to the internet.
+
+### Virtual tests you can reproduce without Telegram login
+
+~~~bash
+python -m unittest discover -s tests -p "test_*.py" -v
+python -m py_compile TelegramAPEX_v9.py desktop_origin_policy.py desktop_media_policy.py desktop_media_paths.py
 cd electron
-npm install
+npm ci
+npm run security:test
+npm audit --audit-level=high
+~~~
+
+The latest verified October 26, 2026 **main-branch CI** ran **12 Python tests** and its Electron/Node policy suite on a clean runner; the Windows job verified the Electron executable. [Inspect actual CI history](https://github.com/teldigi5-wq/TelegramAPEX-repo/actions/workflows/ci.yml).
+
+The tests use synthetic paths and requests: they do not log into Telegram, read private chat data or download user media.
+
+## Windows build and distribution
+
+| Method | Entry point / output | Verification scope |
+| --- | --- | --- |
+| Python EXE | **BUILD_EXE.bat** or [Build Windows EXE](.github/workflows/build.yml) | Produces a standalone backend executable |
+| Full desktop installer | **BUILD_ELECTRON.bat** or [Build Electron Installer](.github/workflows/build-electron.yml) | PyInstaller backend bundled with Electron / NSIS |
+| Pull request packaging | [PR Windows Installer Integration](.github/workflows/electron-pr-packaging.yml) | Creates installer/checksum artifact for review without publishing a release |
+
+Use the **Actions** tab to inspect generated artifacts. GitHub Release workflows are separate publishing actions; a passing pull-request build **does not mean** the installer has been signed, published or installed successfully on a clean user's Windows PC.
+
+For normal Electron development, install Python requirements for the backend first, then:
+
+~~~bash
+cd electron
+npm ci
 npm start
-```
-This runs the backend via `python TelegramAPEX_v9.py` directly (no PyInstaller step) inside
-an Electron window — fast to iterate on.
+~~~
 
-## 🧠 AI Upscale setup (optional)
+### Private session handling
 
-The fast "Upscale to 4K" button works out of the box (just needs ffmpeg). The **AI Upscale**
-button needs one extra one-time download, since it's a ~70MB third-party binary + model that
-isn't bundled with this repo:
+- **config_v10.json** and **apex_session.session** are sensitive; never commit or upload either.
+- Telegram session files can act as account access credentials; log out/revoke a leaked session under Telegram device settings.
+- Avoid uploading private media or accounts to public CI or issue attachments.
+- Report suspected vulnerabilities privately following [SECURITY.md](SECURITY.md).
 
-1. Download the Windows build from the official releases page:
-   **https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan/releases**
-   (grab the asset with "windows" in its name, e.g. `realesrgan-ncnn-vulkan-*-windows.zip`)
-2. Extract the zip.
-3. Create this folder next to `TelegramAPEX_v9.py` (or next to the built `.exe`):
-   `tools\realesrgan\`
-4. Copy everything from the extracted zip into that folder, so you end up with:
-   ```
-   tools\realesrgan\realesrgan-ncnn-vulkan.exe
-   tools\realesrgan\models\  (folder with the .bin/.param model files)
-   ```
-5. Restart the app. The Downloads tab will detect it automatically — no config needed.
+## Portfolio ownership and technical walkthrough
 
-That's it — no separate install, no PATH changes. If you'd rather install it system-wide
-instead, putting `realesrgan-ncnn-vulkan.exe` anywhere on your PATH also works.
+**Maintainer:** [Poojana Kaveesh Sellahewa](https://github.com/teldigi5-wq). Demonstrable repository work includes local service boundaries, filesystem path tests, Python/Electron packaging and security regression workflows. The [commit history](https://github.com/teldigi5-wq/TelegramAPEX-repo/commits/main) and [PR history](https://github.com/teldigi5-wq/TelegramAPEX-repo/pulls?q=is%3Apr) provide reviewable evidence. In an interview, say which decisions and implementation tasks you carried out yourself, and disclose collaborators or AI/tool assistance where applicable. No claim of sole manual authorship is implied.
 
-## 🔒 Security — read this before pushing to GitHub
+**A concise demo:**
+1. Show the local Flask → Telethon → local-files architecture, without revealing a personal session.
+2. Run the Python path-traversal and loopback-origin tests.
+3. Explain the Python backend / Electron wrapper separation and safe shutdown.
+4. Show the audited dependency lockfiles and successful PR installer workflow.
+5. Describe unverified account-level and Windows-installed-app scenarios transparently.
 
-This app stores two sensitive files **next to itself**, both already excluded via
-`.gitignore` — do not remove them from `.gitignore` and do not commit these:
+## Current limitations / next work
 
-- `config_v10.json` — contains your Telegram **API ID and Hash**
-- `apex_session.session` — your **live, logged-in Telegram session**. Anyone who gets this
-  file can access your Telegram account without your password or 2FA. Treat it like a
-  password, never upload it anywhere (including to an AI tool, a support forum, or a public
-  repo).
+- [ ] Record a privacy-safe actual-app screenshot and short demo.
+- [ ] Test full login, reconnection, pagination, download cancellation and media integrity on a dedicated account.
+- [ ] Exercise native installer/uninstall and PyInstaller backend startup on a clean Windows machine.
+- [ ] Add end-to-end tests for local HTTP request paths and error recovery.
+- [ ] Sign published Windows builds and document update/rollback behavior.
+- [ ] Independently verify model/binary provenance before redistribution.
 
-If either file has ever been shared outside your machine, revoke it:
-- Regenerate your API credentials at <https://my.telegram.org/apps>, or
-- Log out the affected session from **Telegram → Settings → Devices**.
-
-## ⚙️ Settings reference
-
-| Setting | Description |
-|---|---|
-| Preset (5G Ultra/Turbo/Balanced/Safe) | Baseline connection count & concurrency. Use 5G Ultra on fast mobile/fiber connections. |
-| Max Simultaneous Downloads | Overrides the preset's concurrency (0 = use preset) |
-| Bandwidth Cap | KB/s, shared fairly across all concurrent downloads (0 = unlimited) |
-| Auto-download new incoming media | Watches for new messages and queues matching media automatically |
-
-## 🛠 Tech
-
-Python · [Telethon](https://docs.telethon.dev) (Telegram MTProto client) · Flask (local web
-server) · vanilla JS/CSS frontend · PyInstaller (packaging)
-
-## License
-
-MIT — see [LICENSE](LICENSE). For personal use with your own Telegram account and content
-you have the right to download. You're responsible for complying with Telegram's
-[Terms of Service](https://telegram.org/tos) and applicable law in how you use this tool.
+**Responsible use:** Access only chats and media for which you have permission. Respect Telegram terms, media rights and account privacy. [MIT license](LICENSE).
