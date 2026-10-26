@@ -69,7 +69,7 @@ jobs:
 
       - name: Install Electron dependencies
         working-directory: electron
-        run: npm install
+        run: npm ci
 
       - name: Build Windows installer
         working-directory: electron

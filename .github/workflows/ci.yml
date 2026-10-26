@@ -32,21 +32,12 @@ jobs:
         with:
           node-version: "24"
 
-      - name: Resolve patched Electron lockfile metadata
-        shell: bash
-        run: |
-          cd electron
-          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
-          node - <<'NODE'
-          const fs = require('fs');
-          const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
-          if (lock.packages['node_modules/electron']?.version !== '44.9.1') throw new Error('Electron resolution did not select 44.9.1');
-          const b64 = fs.readFileSync('package-lock.json').toString('base64');
-          for (let i = 0; i < b64.length; i += 8000) {
-            console.log('ELECTRON_LOCK_CHUNK_' + String(i / 8000).padStart(4, '0') + '=' + b64.slice(i, i + 8000));
-          }
-          console.log('ELECTRON_LOCK_END=' + Math.ceil(b64.length / 8000));
-          NODE
+      - name: Verify pinned Electron dependency installation
+        working-directory: electron
+        run: npm ci --ignore-scripts
+
+      - name: Test Electron package and renderer security policy
+        run: node --test electron/navigation-policy.test.js electron/electron-security.test.js
 
       - name: Check Python syntax
         run: python -m py_compile TelegramAPEX_v9.py
@@ -72,3 +63,23 @@ jobs:
           for path in (Path('config_v10.example.json'), Path('electron/package.json')):
               json.loads(path.read_text(encoding='utf-8'))
               print(f'{path} is valid JSON')
+
+  electron-windows-smoke:
+    name: Verify Electron on Windows
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: electron/package-lock.json
+      - name: Install desktop dependencies
+        working-directory: electron
+        run: npm ci
+      - name: Verify Windows Electron executable
+        working-directory: electron
+        run: npx electron --version
+      - name: Check desktop security policy
+        run: node --test electron/navigation-policy.test.js electron/electron-security.test.js
