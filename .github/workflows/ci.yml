@@ -32,6 +32,13 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Verify pinned Electron dependency installation
+        working-directory: electron
+        run: npm ci --ignore-scripts
+
+      - name: Test Electron package and renderer security policy
+        run: node --test electron/navigation-policy.test.js electron/electron-security.test.js
+
       - name: Check Python syntax
         run: python -m py_compile TelegramAPEX_v9.py
 
@@ -56,3 +63,42 @@ jobs:
           for path in (Path('config_v10.example.json'), Path('electron/package.json')):
               json.loads(path.read_text(encoding='utf-8'))
               print(f'{path} is valid JSON')
+
+      - name: Audit Electron dependency graph (high severity)
+        working-directory: electron
+        run: npm audit --audit-level=high
+
+  electron-windows-smoke:
+    name: Verify Electron on Windows
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: electron/package-lock.json
+      - name: Install desktop dependencies
+        working-directory: electron
+        run: npm ci
+      - name: Verify Windows Electron executable
+        working-directory: electron
+        run: npx electron --version
+      - name: Check desktop security policy
+        run: node --test electron/navigation-policy.test.js electron/electron-security.test.js
+
+  audit-python-build:
+    name: Audit pinned Python backend packaging dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python dependency vulnerability scanner
+        run: python -m pip install pip-audit
+      - name: Scan exact Python dependency versions
+        run: python -m pip_audit -r requirements-electron-build.txt --no-deps

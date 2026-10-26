@@ -9,11 +9,12 @@
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder --win",
-    "dist:dir": "electron-builder --win --dir"
+    "dist:dir": "electron-builder --win --dir",
+    "security:test": "node --test navigation-policy.test.js electron-security.test.js"
   },
   "devDependencies": {
-    "electron": "^31.0.0",
-    "electron-builder": "^24.13.3"
+    "electron": "44.9.1",
+    "electron-builder": "^26.18.0"
   },
   "build": {
     "appId": "com.teldigi5wq.telegramapex",
@@ -51,5 +52,8 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
     }
+  },
+  "engines": {
+    "node": ">=22.12.0"
   }
 }

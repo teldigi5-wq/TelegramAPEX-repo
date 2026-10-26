@@ -24,12 +24,18 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install telethon pillow cryptg pyaes rsa flask pyinstaller
+          python -m pip install -r requirements-electron-build.txt
+          python -m pip check
+
+      - name: Recheck pinned Python build dependency advisories
+        run: |
+          python -m pip install pip-audit
+          python -m pip_audit -r requirements-electron-build.txt --no-deps
 
       - name: Build backend EXE with PyInstaller
         shell: cmd
@@ -69,7 +75,11 @@ jobs:
 
       - name: Install Electron dependencies
         working-directory: electron
-        run: npm install
+        run: npm ci
+
+      - name: Audit release Electron dependencies
+        working-directory: electron
+        run: npm audit --audit-level=high
 
       - name: Build Windows installer
         working-directory: electron
@@ -82,15 +92,22 @@ jobs:
           $exe = Get-ChildItem -Path "electron/release" -Filter "*.exe" | Select-Object -First 1
           echo "path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
           echo "name=$($exe.Name)" >> $env:GITHUB_OUTPUT
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $exe.FullName).Hash
+          if (-not $hash) { throw "Could not hash installer" }
+          "$($hash.ToLowerInvariant())  $($exe.Name)" | Set-Content -Path electron/release/SHA256SUMS.txt -Encoding ascii
 
       - name: Upload artifact (every run)
         uses: actions/upload-artifact@v4
         with:
           name: TelegramAPEX-installer-windows
-          path: ${{ steps.find_installer.outputs.path }}
+          path: |
+            ${{ steps.find_installer.outputs.path }}
+            electron/release/SHA256SUMS.txt
 
       - name: Attach installer to release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ steps.find_installer.outputs.path }}
+          files: |
+            ${{ steps.find_installer.outputs.path }}
+            electron/release/SHA256SUMS.txt
