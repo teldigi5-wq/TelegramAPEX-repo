@@ -92,15 +92,20 @@ jobs:
           $exe = Get-ChildItem -Path "electron/release" -Filter "*.exe" | Select-Object -First 1
           echo "path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
           echo "name=$($exe.Name)" >> $env:GITHUB_OUTPUT
+          "$($hash.ToLowerInvariant())  $($exe.Name)" | Set-Content -Path electron/release/SHA256SUMS.txt -Encoding ascii
 
       - name: Upload artifact (every run)
         uses: actions/upload-artifact@v4
         with:
           name: TelegramAPEX-installer-windows
-          path: ${{ steps.find_installer.outputs.path }}
+          path: |
+            ${{ steps.find_installer.outputs.path }}
+            electron/release/SHA256SUMS.txt
 
       - name: Attach installer to release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ steps.find_installer.outputs.path }}
+          files: |
+            ${{ steps.find_installer.outputs.path }}
+            electron/release/SHA256SUMS.txt
