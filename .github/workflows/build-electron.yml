@@ -92,6 +92,8 @@ jobs:
           $exe = Get-ChildItem -Path "electron/release" -Filter "*.exe" | Select-Object -First 1
           echo "path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
           echo "name=$($exe.Name)" >> $env:GITHUB_OUTPUT
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $exe.FullName).Hash
+          if (-not $hash) { throw "Could not hash installer" }
           "$($hash.ToLowerInvariant())  $($exe.Name)" | Set-Content -Path electron/release/SHA256SUMS.txt -Encoding ascii
 
       - name: Upload artifact (every run)
