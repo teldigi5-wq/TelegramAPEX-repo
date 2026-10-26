@@ -43,6 +43,11 @@ jobs:
           python -m pip install -r requirements-electron-build.txt
           python -m pip check
 
+      - name: Recheck pinned Python build dependency advisories
+        run: |
+          python -m pip install pip-audit
+          python -m pip_audit -r requirements-electron-build.txt --no-deps
+
       - name: Build backend EXE with PyInstaller
         shell: cmd
         run: |
