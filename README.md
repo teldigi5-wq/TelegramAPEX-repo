@@ -144,3 +144,10 @@ npm start
 - [ ] Independently verify model/binary provenance before redistribution.
 
 **Responsible use:** Access only chats and media for which you have permission. Respect Telegram terms, media rights and account privacy. [MIT license](LICENSE).
+
+
+---
+
+## AI/developer recovery checkpoint (9 November 2026)
+
+See [the source-pinned and privacy-safe continuation guide](docs/AI_HANDOFF_2026-11-09.md). This records `main` at `df9c27312c68`; recheck the live branch and tests before work resumes. Documentation-only, not a production release or security certification.
