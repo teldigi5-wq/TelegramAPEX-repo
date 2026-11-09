@@ -144,3 +144,7 @@ npm start
 - [ ] Independently verify model/binary provenance before redistribution.
 
 **Responsible use:** Access only chats and media for which you have permission. Respect Telegram terms, media rights and account privacy. [MIT license](LICENSE).
+
+## AI/developer continuation — 9 November 2026
+
+See the [source-aware handoff and next milestones](docs/AI_CONTINUATION_2026-11-09.md) before continuing this project. This is a documentation-only review branch; recheck current PR heads, CI and deployed state. No merge, new certification or production rollout is implied.
